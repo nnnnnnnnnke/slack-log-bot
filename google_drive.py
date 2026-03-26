@@ -1,7 +1,9 @@
 """Google Drive handler for uploading Slack attachments."""
 
 import io
+import json
 import logging
+import os
 import requests
 
 from google.oauth2.service_account import Credentials
@@ -12,18 +14,45 @@ import config
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 class DriveHandler:
     def __init__(self):
-        creds = Credentials.from_service_account_file(
-            config.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=SCOPES
-        )
+        creds = self._load_credentials()
         self.service = build("drive", "v3", credentials=creds)
         self.root_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
         # Cache: channel_name -> folder_id
         self._channel_folders: dict[str, str] = {}
+
+    def _load_credentials(self):
+        """Load OAuth2 credentials if available, else fall back to service account."""
+        token_file = config.GOOGLE_DRIVE_TOKEN_FILE
+        if os.path.exists(token_file):
+            from google.oauth2.credentials import Credentials as OAuthCredentials
+            from google.auth.transport.requests import Request
+
+            creds = OAuthCredentials.from_authorized_user_file(token_file, SCOPES)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                # Save refreshed token
+                token_data = {
+                    "token": creds.token,
+                    "refresh_token": creds.refresh_token,
+                    "token_uri": creds.token_uri,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                    "scopes": list(creds.scopes or SCOPES),
+                }
+                with open(token_file, "w") as f:
+                    json.dump(token_data, f, indent=2)
+            logger.info("Using OAuth2 credentials for Google Drive")
+            return creds
+
+        logger.info("Using service account credentials for Google Drive (Shared Drives only)")
+        return Credentials.from_service_account_file(
+            config.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=SCOPES
+        )
 
     def _share_with_anyone(self, file_id: str):
         """Make a file/folder readable by anyone with the link."""

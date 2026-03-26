@@ -4,7 +4,9 @@ Public channels  → shared spreadsheet (anyone with link), tabs per channel
 Private channels → separate spreadsheet per channel, shared with members only
 """
 
+import json
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 import gspread
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 HEADER_ROW = [
@@ -26,7 +28,6 @@ HEADER_ROW = [
     "表示名",
     "ユーザー名",
     "メッセージ",
-    "スレッド元メッセージ",
     "添付ファイル",
     "パーマリンク",
     "メッセージTS",
@@ -34,16 +35,16 @@ HEADER_ROW = [
 ]
 
 # Column indices (1-indexed)
-TS_COLUMN = 9
-THREAD_TS_COLUMN = 10
+TS_COLUMN = 8
+THREAD_TS_COLUMN = 9
 
 # Column widths (pixels)
-COLUMN_WIDTHS = [155, 100, 120, 120, 420, 260, 200, 100, 140, 140]
+COLUMN_WIDTHS = [155, 100, 120, 120, 500, 200, 100, 140, 140]
 
 # Colors (RGB 0-1 float)
-COLOR_HEADER_BG = {"red": 0.29, "green": 0.08, "blue": 0.30}      # #4A154D Slack aubergine
+COLOR_HEADER_BG = {"red": 0.118, "green": 0.557, "blue": 0.243}   # #1e8e3e Green
 COLOR_HEADER_FG = {"red": 1.0, "green": 1.0, "blue": 1.0}         # white
-COLOR_THREAD_BG = {"red": 0.95, "green": 0.96, "blue": 0.99}      # #F2F5FD light blue-gray
+COLOR_THREAD_BG = {"red": 0.902, "green": 0.957, "blue": 0.918}   # #e6f4ea Light Green
 COLOR_TS_FG = {"red": 0.55, "green": 0.55, "blue": 0.55}          # #8C8C8C gray
 
 JST = timezone(timedelta(hours=9))
@@ -54,18 +55,54 @@ THREAD_PREFIX = "└ "
 
 class SheetsHandler:
     def __init__(self):
-        self._creds = Credentials.from_service_account_file(
+        self._sa_creds = Credentials.from_service_account_file(
             config.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=SCOPES
         )
-        self.gc = gspread.authorize(self._creds)
-        self.drive_service = build("drive", "v3", credentials=self._creds)
+        # Service account client for reading/writing existing spreadsheets
+        self.gc = gspread.authorize(self._sa_creds)
         self.public_spreadsheet = self.gc.open_by_key(config.GOOGLE_SPREADSHEET_ID)
+
+        # OAuth2 client for creating new spreadsheets (service accounts have no Drive quota)
+        self._oauth_creds = None
+        self._oauth_gc = self._load_oauth_client()
+        if self._oauth_creds:
+            self._oauth_drive = build("drive", "v3", credentials=self._oauth_creds)
+        else:
+            self._oauth_drive = build("drive", "v3", credentials=self._sa_creds)
+
         self.drive_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
         self._sheet_cache: dict[str, gspread.Worksheet] = {}
         self._existing_ts: dict[str, set[str]] = {}
         self._private_spreadsheets: dict[str, gspread.Spreadsheet] = {}
-        # Track which sheets have already been formatted
         self._formatted_sheets: set[str] = set()
+
+    def _load_oauth_client(self) -> gspread.Client | None:
+        """Load OAuth2 gspread client for creating new files."""
+        token_file = config.GOOGLE_DRIVE_TOKEN_FILE
+        if not os.path.exists(token_file):
+            logger.warning("No OAuth2 token found - private channel spreadsheets may fail")
+            return None
+
+        from google.oauth2.credentials import Credentials as OAuthCredentials
+        from google.auth.transport.requests import Request
+
+        creds = OAuthCredentials.from_authorized_user_file(token_file)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            token_data = {
+                "token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": list(creds.scopes or SCOPES),
+            }
+            with open(token_file, "w") as f:
+                json.dump(token_data, f, indent=2)
+
+        logger.info("OAuth2 client loaded for private spreadsheet creation")
+        self._oauth_creds = creds
+        return gspread.authorize(creds)
 
     # ── Sheet formatting ──
 
@@ -139,33 +176,34 @@ class SheetsHandler:
             }
         })
 
-        # 5. Text wrapping on message + thread columns (E, F)
+        # 5. Text wrapping + larger font on message column (E)
         requests.append({
             "repeatCell": {
                 "range": {
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
                     "startColumnIndex": 4,
-                    "endColumnIndex": 6,
+                    "endColumnIndex": 5,
                 },
                 "cell": {
                     "userEnteredFormat": {
                         "wrapStrategy": "WRAP",
                         "verticalAlignment": "TOP",
+                        "textFormat": {"fontSize": 11},
                     }
                 },
-                "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)",
+                "fields": "userEnteredFormat(wrapStrategy,verticalAlignment,textFormat.fontSize)",
             }
         })
 
-        # 6. TS columns (I, J): gray smaller font
+        # 6. TS columns (H, I): gray smaller font
         requests.append({
             "repeatCell": {
                 "range": {
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
-                    "startColumnIndex": 8,
-                    "endColumnIndex": 10,
+                    "startColumnIndex": 7,
+                    "endColumnIndex": 9,
                 },
                 "cell": {
                     "userEnteredFormat": {
@@ -317,13 +355,14 @@ class SheetsHandler:
 
         ss_name = f"Slack Log - #{channel_name}"
 
+        # Search using OAuth2 Drive client
         query = (
             f"name = '{ss_name}' and "
             f"'{self.drive_folder_id}' in parents and "
             f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
             f"trashed = false"
         )
-        results = self.drive_service.files().list(
+        results = self._oauth_drive.files().list(
             q=query, fields="files(id, name)", pageSize=1
         ).execute()
         files = results.get("files", [])
@@ -331,7 +370,14 @@ class SheetsHandler:
         if files:
             ss = self.gc.open_by_key(files[0]["id"])
         else:
-            ss = self.gc.create(ss_name, folder_id=self.drive_folder_id)
+            # Create with OAuth2 client (service account has no Drive quota)
+            creator = self._oauth_gc or self.gc
+            ss = creator.create(ss_name, folder_id=self.drive_folder_id)
+
+            # Share with service account so it can read/write
+            sa_email = self._sa_creds.service_account_email
+            ss.share(sa_email, perm_type="user", role="writer", notify=False)
+
             for email in member_emails:
                 try:
                     ss.share(email, perm_type="user", role="reader", notify=False)
@@ -411,14 +457,9 @@ class SheetsHandler:
         text: str,
         ts: str,
         thread_ts: str | None,
-        parent_text: str | None,
         attachment_links: list[str],
         permalink: str,
     ) -> list[str]:
-        parent_preview = ""
-        if parent_text:
-            parent_preview = parent_text[:100] + ("..." if len(parent_text) > 100 else "")
-
         # Thread replies get a visual prefix
         is_reply = thread_ts and thread_ts != ts
         display_text = f"{THREAD_PREFIX}{text}" if is_reply else text
@@ -429,12 +470,19 @@ class SheetsHandler:
             display_name,
             f"@{username}",
             display_text,
-            parent_preview,
             "\n".join(attachment_links),
             permalink,
             ts,
             thread_ts or "",
         ]
+
+    def get_spreadsheet_url(self, channel_name: str, is_private: bool = False) -> str | None:
+        """Return the spreadsheet URL for a channel."""
+        if is_private and channel_name in self._private_spreadsheets:
+            return self._private_spreadsheets[channel_name].url
+        if not is_private:
+            return self.public_spreadsheet.url
+        return None
 
     # ── Realtime insert (main.py) ──
 
@@ -446,7 +494,6 @@ class SheetsHandler:
         text: str,
         ts: str,
         thread_ts: str | None,
-        parent_text: str | None,
         attachment_links: list[str],
         permalink: str,
         is_private: bool = False,
@@ -461,7 +508,7 @@ class SheetsHandler:
 
         row = self._build_row(
             channel_name, display_name, username, text,
-            ts, thread_ts, parent_text, attachment_links, permalink,
+            ts, thread_ts, attachment_links, permalink,
         )
 
         is_thread_reply = thread_ts and thread_ts != ts
@@ -550,7 +597,6 @@ class SheetsHandler:
                     text=msg["text"],
                     ts=msg["ts"],
                     thread_ts=msg.get("thread_ts"),
-                    parent_text=msg.get("parent_text"),
                     attachment_links=msg.get("attachment_links", []),
                     permalink=msg.get("permalink", ""),
                 )

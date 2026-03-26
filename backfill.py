@@ -126,7 +126,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                     "text": text,
                     "ts": ts,
                     "thread_ts": None,
-                    "parent_text": None,
                     "attachment_links": attachment_links,
                     "permalink": permalink,
                 })
@@ -176,7 +175,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                                 "text": r_text,
                                 "ts": r_ts,
                                 "thread_ts": ts,
-                                "parent_text": text,
                                 "attachment_links": r_links,
                                 "permalink": r_permalink,
                             })
