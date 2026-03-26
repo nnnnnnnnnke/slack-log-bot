@@ -25,7 +25,28 @@ class DriveHandler:
         # Cache: channel_name -> folder_id
         self._channel_folders: dict[str, str] = {}
 
-    def _get_or_create_channel_folder(self, channel_name: str) -> str:
+    def _share_with_anyone(self, file_id: str):
+        """Make a file/folder readable by anyone with the link."""
+        self.service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+        ).execute()
+
+    def _share_with_emails(self, file_id: str, emails: list[str]):
+        """Share a file/folder with specific email addresses."""
+        for email in emails:
+            try:
+                self.service.permissions().create(
+                    fileId=file_id,
+                    body={"type": "user", "role": "reader", "emailAddress": email},
+                    sendNotificationEmail=False,
+                ).execute()
+            except Exception as e:
+                logger.warning(f"Failed to share with {email}: {e}")
+
+    def _get_or_create_channel_folder(
+        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None
+    ) -> str:
         """Get or create a subfolder for the channel under the root folder."""
         if channel_name in self._channel_folders:
             return self._channel_folders[channel_name]
@@ -56,22 +77,28 @@ class DriveHandler:
             ).execute()
             folder_id = folder["id"]
 
-            # Make folder readable by anyone with the link
-            self.service.permissions().create(
-                fileId=folder_id,
-                body={"type": "anyone", "role": "reader"},
-            ).execute()
-
-            logger.info(f"Created Drive folder: #{channel_name}")
+            # Set permissions based on channel type
+            if is_private and member_emails:
+                self._share_with_emails(folder_id, member_emails)
+                logger.info(f"Created private Drive folder: #{channel_name} (shared with {len(member_emails)} members)")
+            else:
+                self._share_with_anyone(folder_id)
+                logger.info(f"Created public Drive folder: #{channel_name}")
 
         self._channel_folders[channel_name] = folder_id
         return folder_id
 
     def upload_file(
-        self, file_name: str, file_bytes: bytes, mime_type: str, channel_name: str
+        self,
+        file_name: str,
+        file_bytes: bytes,
+        mime_type: str,
+        channel_name: str,
+        is_private: bool = False,
+        member_emails: list[str] | None = None,
     ) -> str:
         """Upload a file to the channel's folder and return its shareable link."""
-        folder_id = self._get_or_create_channel_folder(channel_name)
+        folder_id = self._get_or_create_channel_folder(channel_name, is_private, member_emails)
 
         file_metadata = {
             "name": file_name,
@@ -86,17 +113,22 @@ class DriveHandler:
             .execute()
         )
 
-        # Make file readable by anyone with the link
-        self.service.permissions().create(
-            fileId=uploaded["id"],
-            body={"type": "anyone", "role": "reader"},
-        ).execute()
+        # Set permissions based on channel type
+        if is_private and member_emails:
+            self._share_with_emails(uploaded["id"], member_emails)
+        else:
+            self._share_with_anyone(uploaded["id"])
 
         logger.info(f"Uploaded to Drive: #{channel_name}/{file_name} -> {uploaded['webViewLink']}")
         return uploaded["webViewLink"]
 
     def download_from_slack_and_upload(
-        self, file_info: dict, slack_token: str, channel_name: str
+        self,
+        file_info: dict,
+        slack_token: str,
+        channel_name: str,
+        is_private: bool = False,
+        member_emails: list[str] | None = None,
     ) -> str | None:
         """Download a file from Slack and upload it to Google Drive.
 
@@ -129,7 +161,10 @@ class DriveHandler:
         mime_type = file_info.get("mimetype", "application/octet-stream")
 
         try:
-            return self.upload_file(file_name, resp.content, mime_type, channel_name)
+            return self.upload_file(
+                file_name, resp.content, mime_type,
+                channel_name, is_private, member_emails,
+            )
         except Exception as e:
             logger.error(f"Failed to upload to Drive: {e}")
             return None

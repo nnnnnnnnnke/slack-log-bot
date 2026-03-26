@@ -1,6 +1,7 @@
 """Backfill tool - Fetch existing message history and save to Google Sheets/Drive.
 
 Messages and their thread replies are grouped together in the spreadsheet.
+Public channels → shared spreadsheet, Private channels → separate spreadsheet.
 
 Usage:
     python backfill.py                      # All channels the bot is in
@@ -19,6 +20,7 @@ from slack_sdk import WebClient
 import config
 from google_sheets import SheetsHandler
 from google_drive import DriveHandler
+from slack_utils import get_user_info, get_member_emails
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,34 +30,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def resolve_user(client: WebClient, user_id: str, cache: dict) -> tuple[str, str]:
-    """Resolve Slack user ID to (display_name, username)."""
-    if user_id in cache:
-        return cache[user_id]
-    try:
-        result = client.users_info(user=user_id)
-        user = result["user"]
-        profile = user.get("profile", {})
-        display_name = (
-            profile.get("display_name")
-            or profile.get("real_name")
-            or user.get("real_name")
-            or user.get("name")
-            or user_id
-        )
-        username = user.get("name", user_id)
-        cache[user_id] = (display_name, username)
-        return (display_name, username)
-    except Exception:
-        return (user_id, user_id)
-
-
 def backfill(channel_filter: str | None = None, days: int = 90):
     client = WebClient(token=config.SLACK_BOT_TOKEN)
     sheets = SheetsHandler()
     drive = DriveHandler()
-
-    user_cache: dict[str, tuple[str, str]] = {}
 
     # Get channels
     channels = []
@@ -88,7 +66,12 @@ def backfill(channel_filter: str | None = None, days: int = 90):
     for ch in channels:
         ch_name = ch["name"]
         ch_id = ch["id"]
-        logger.info(f"Backfilling #{ch_name}...")
+        is_private = ch.get("is_private", False) or ch.get("is_group", False)
+
+        label = "private" if is_private else "public"
+        logger.info(f"Backfilling #{ch_name} [{label}]...")
+
+        member_emails = get_member_emails(client, ch_id) if is_private else None
 
         # Phase 1: Collect all messages
         collected: list[dict] = []
@@ -118,7 +101,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                 text = msg.get("text", "")
                 files = msg.get("files", [])
 
-                display_name, username = resolve_user(client, user_id, user_cache)
+                display_name, username, _ = get_user_info(client, user_id)
 
                 permalink = ""
                 try:
@@ -129,7 +112,10 @@ def backfill(channel_filter: str | None = None, days: int = 90):
 
                 attachment_links = []
                 for f in files:
-                    link = drive.download_from_slack_and_upload(f, config.SLACK_BOT_TOKEN, ch_name)
+                    link = drive.download_from_slack_and_upload(
+                        f, config.SLACK_BOT_TOKEN, ch_name,
+                        is_private, member_emails,
+                    )
                     if link:
                         attachment_links.append(link)
 
@@ -145,7 +131,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                     "permalink": permalink,
                 })
 
-                # Fetch thread replies
                 if msg.get("reply_count", 0) > 0:
                     try:
                         thread_resp = client.conversations_replies(
@@ -164,7 +149,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             r_text = reply.get("text", "")
                             r_files = reply.get("files", [])
 
-                            r_display, r_username = resolve_user(client, r_user, user_cache)
+                            r_display, r_username, _ = get_user_info(client, r_user)
 
                             r_permalink = ""
                             try:
@@ -178,7 +163,8 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             r_links = []
                             for f in r_files:
                                 link = drive.download_from_slack_and_upload(
-                                    f, config.SLACK_BOT_TOKEN, ch_name
+                                    f, config.SLACK_BOT_TOKEN, ch_name,
+                                    is_private, member_emails,
                                 )
                                 if link:
                                     r_links.append(link)
@@ -206,7 +192,9 @@ def backfill(channel_filter: str | None = None, days: int = 90):
             time.sleep(1)
 
         # Phase 2: Write grouped by thread
-        new_count, skip_count = sheets.write_messages_grouped(ch_name, collected)
+        new_count, skip_count = sheets.write_messages_grouped(
+            ch_name, collected, is_private, member_emails,
+        )
         logger.info(f"  #{ch_name}: {new_count} new, {skip_count} duplicates skipped")
         total_new += new_count
         total_skipped += skip_count
