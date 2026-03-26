@@ -19,6 +19,19 @@ Slack無料プランではメッセージ履歴が一定期間で消えてしま
 - **アクセス制御** — パブリックチャンネルはリンク共有、プライベートチャンネルはメンバー限定共有
 - **見やすいスプレッドシート** — ヘッダー固定・色分け・列幅調整・オートフィルターを自動適用
 
+## 動作イメージ
+
+<table>
+  <tr>
+    <td width="50%"><strong>Slack</strong></td>
+    <td width="50%"><strong>Google Sheets</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshot_slack.png" alt="Slack側の動作イメージ"></td>
+    <td><img src="docs/screenshot_sheets.png" alt="スプレッドシート側の動作イメージ"></td>
+  </tr>
+</table>
+
 ## プロジェクト構成
 
 ```
