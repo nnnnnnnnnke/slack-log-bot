@@ -2,6 +2,7 @@
 
 Designed to run as a weekly cron job. Deduplication ensures no duplicate messages
 even if collection periods overlap or the script runs multiple times.
+Messages and their thread replies are grouped together in the spreadsheet.
 
 Usage:
     python collect_weekly.py                    # Past 7 days, all channels
@@ -95,8 +96,8 @@ def collect(channel_filter: str | None = None, days: int = 8):
         ch_id = ch["id"]
         logger.info(f"Collecting #{ch_name} (past {days} days)...")
 
-        new_count = 0
-        skip_count = 0
+        # Phase 1: Collect all messages into a list
+        collected: list[dict] = []
         cursor = None
 
         while True:
@@ -121,7 +122,6 @@ def collect(channel_filter: str | None = None, days: int = 8):
 
                 ts = msg.get("ts", "")
                 text = msg.get("text", "")
-                thread_ts = msg.get("thread_ts")
                 files = msg.get("files", [])
 
                 display_name, username = resolve_user(client, user_id, user_cache)
@@ -139,21 +139,18 @@ def collect(channel_filter: str | None = None, days: int = 8):
                     if link:
                         attachment_links.append(link)
 
-                added = sheets.append_message(
-                    channel_name=ch_name,
-                    display_name=display_name,
-                    username=username,
-                    text=text,
-                    ts=ts,
-                    thread_ts=thread_ts,
-                    parent_text=None,
-                    attachment_links=attachment_links,
-                    permalink=permalink,
-                )
-                if added:
-                    new_count += 1
-                else:
-                    skip_count += 1
+                # Parent message (thread_ts == ts or no thread_ts)
+                collected.append({
+                    "channel_name": ch_name,
+                    "display_name": display_name,
+                    "username": username,
+                    "text": text,
+                    "ts": ts,
+                    "thread_ts": None,
+                    "parent_text": None,
+                    "attachment_links": attachment_links,
+                    "permalink": permalink,
+                })
 
                 # Fetch thread replies
                 if msg.get("reply_count", 0) > 0:
@@ -162,7 +159,6 @@ def collect(channel_filter: str | None = None, days: int = 8):
                             channel=ch_id, ts=ts, limit=200
                         )
                         replies = thread_resp.get("messages", [])
-                        parent_text = text
 
                         for reply in replies[1:]:
                             r_user = reply.get("user", "")
@@ -194,21 +190,17 @@ def collect(channel_filter: str | None = None, days: int = 8):
                                 if link:
                                     r_links.append(link)
 
-                            r_added = sheets.append_message(
-                                channel_name=ch_name,
-                                display_name=r_display,
-                                username=r_username,
-                                text=r_text,
-                                ts=r_ts,
-                                thread_ts=ts,
-                                parent_text=parent_text,
-                                attachment_links=r_links,
-                                permalink=r_permalink,
-                            )
-                            if r_added:
-                                new_count += 1
-                            else:
-                                skip_count += 1
+                            collected.append({
+                                "channel_name": ch_name,
+                                "display_name": r_display,
+                                "username": r_username,
+                                "text": r_text,
+                                "ts": r_ts,
+                                "thread_ts": ts,
+                                "parent_text": text,
+                                "attachment_links": r_links,
+                                "permalink": r_permalink,
+                            })
 
                     except Exception as e:
                         logger.error(f"Failed to fetch thread replies: {e}")
@@ -220,6 +212,8 @@ def collect(channel_filter: str | None = None, days: int = 8):
                 break
             time.sleep(1)
 
+        # Phase 2: Write all messages grouped by thread
+        new_count, skip_count = sheets.write_messages_grouped(ch_name, collected)
         logger.info(f"  #{ch_name}: {new_count} new, {skip_count} duplicates skipped")
         total_new += new_count
         total_skipped += skip_count

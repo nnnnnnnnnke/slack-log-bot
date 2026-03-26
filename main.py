@@ -127,9 +127,9 @@ def handle_message(event, client, logger):
     # Process file attachments
     attachment_links = process_files(files, channel_name) if files else []
 
-    # Log to Google Sheets (deduplication handled inside)
+    # Log to Google Sheets (thread replies inserted next to parent)
     try:
-        sheets.append_message(
+        sheets.insert_message(
             channel_name=channel_name,
             display_name=display_name,
             username=username,

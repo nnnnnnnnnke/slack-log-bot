@@ -1,5 +1,7 @@
 """Backfill tool - Fetch existing message history and save to Google Sheets/Drive.
 
+Messages and their thread replies are grouped together in the spreadsheet.
+
 Usage:
     python backfill.py                      # All channels the bot is in
     python backfill.py --channel general     # Specific channel by name
@@ -88,8 +90,8 @@ def backfill(channel_filter: str | None = None, days: int = 90):
         ch_id = ch["id"]
         logger.info(f"Backfilling #{ch_name}...")
 
-        new_count = 0
-        skip_count = 0
+        # Phase 1: Collect all messages
+        collected: list[dict] = []
         cursor = None
 
         while True:
@@ -114,7 +116,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
 
                 ts = msg.get("ts", "")
                 text = msg.get("text", "")
-                thread_ts = msg.get("thread_ts")
                 files = msg.get("files", [])
 
                 display_name, username = resolve_user(client, user_id, user_cache)
@@ -132,21 +133,17 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                     if link:
                         attachment_links.append(link)
 
-                added = sheets.append_message(
-                    channel_name=ch_name,
-                    display_name=display_name,
-                    username=username,
-                    text=text,
-                    ts=ts,
-                    thread_ts=thread_ts,
-                    parent_text=None,
-                    attachment_links=attachment_links,
-                    permalink=permalink,
-                )
-                if added:
-                    new_count += 1
-                else:
-                    skip_count += 1
+                collected.append({
+                    "channel_name": ch_name,
+                    "display_name": display_name,
+                    "username": username,
+                    "text": text,
+                    "ts": ts,
+                    "thread_ts": None,
+                    "parent_text": None,
+                    "attachment_links": attachment_links,
+                    "permalink": permalink,
+                })
 
                 # Fetch thread replies
                 if msg.get("reply_count", 0) > 0:
@@ -155,7 +152,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             channel=ch_id, ts=ts, limit=200
                         )
                         replies = thread_resp.get("messages", [])
-                        parent_text = text
 
                         for reply in replies[1:]:
                             r_user = reply.get("user", "")
@@ -187,21 +183,17 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                                 if link:
                                     r_links.append(link)
 
-                            r_added = sheets.append_message(
-                                channel_name=ch_name,
-                                display_name=r_display,
-                                username=r_username,
-                                text=r_text,
-                                ts=r_ts,
-                                thread_ts=ts,
-                                parent_text=parent_text,
-                                attachment_links=r_links,
-                                permalink=r_permalink,
-                            )
-                            if r_added:
-                                new_count += 1
-                            else:
-                                skip_count += 1
+                            collected.append({
+                                "channel_name": ch_name,
+                                "display_name": r_display,
+                                "username": r_username,
+                                "text": r_text,
+                                "ts": r_ts,
+                                "thread_ts": ts,
+                                "parent_text": text,
+                                "attachment_links": r_links,
+                                "permalink": r_permalink,
+                            })
 
                     except Exception as e:
                         logger.error(f"Failed to fetch thread replies: {e}")
@@ -213,6 +205,8 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                 break
             time.sleep(1)
 
+        # Phase 2: Write grouped by thread
+        new_count, skip_count = sheets.write_messages_grouped(ch_name, collected)
         logger.info(f"  #{ch_name}: {new_count} new, {skip_count} duplicates skipped")
         total_new += new_count
         total_skipped += skip_count
