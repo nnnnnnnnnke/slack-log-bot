@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.png" alt="Slack Log Bot" width="100%">
+</p>
+
 # Slack Log Bot
 
 Slack無料プランではメッセージ履歴が一定期間で消えてしまいます。
