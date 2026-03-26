@@ -470,13 +470,13 @@ class SheetsHandler:
         if is_thread_reply:
             insert_pos = self._find_thread_insert_position(worksheet, thread_ts)
             if insert_pos:
-                worksheet.insert_row(row, insert_pos, value_input_option="USER_ENTERED")
+                worksheet.insert_row(row, insert_pos, value_input_option="RAW")
                 inserted_row = insert_pos
             else:
-                worksheet.append_row(row, value_input_option="USER_ENTERED")
+                worksheet.append_row(row, value_input_option="RAW")
                 inserted_row = worksheet.row_count
         else:
-            worksheet.append_row(row, value_input_option="USER_ENTERED")
+            worksheet.append_row(row, value_input_option="RAW")
 
         # Color thread reply row
         if is_thread_reply and inserted_row:
@@ -562,7 +562,7 @@ class SheetsHandler:
         start_row = len(worksheet.col_values(1)) + 1  # 1-indexed, after existing data
 
         # Batch append
-        worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+        worksheet.append_rows(rows, value_input_option="RAW")
 
         # Apply thread reply background colors
         self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
