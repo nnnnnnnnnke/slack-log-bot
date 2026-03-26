@@ -135,7 +135,7 @@ def collect(channel_filter: str | None = None, days: int = 8):
 
                 attachment_links = []
                 for f in files:
-                    link = drive.download_from_slack_and_upload(f, config.SLACK_BOT_TOKEN)
+                    link = drive.download_from_slack_and_upload(f, config.SLACK_BOT_TOKEN, ch_name)
                     if link:
                         attachment_links.append(link)
 
@@ -189,7 +189,7 @@ def collect(channel_filter: str | None = None, days: int = 8):
                             r_links = []
                             for f in r_files:
                                 link = drive.download_from_slack_and_upload(
-                                    f, config.SLACK_BOT_TOKEN
+                                    f, config.SLACK_BOT_TOKEN, ch_name
                                 )
                                 if link:
                                     r_links.append(link)

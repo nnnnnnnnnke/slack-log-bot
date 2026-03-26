@@ -87,11 +87,11 @@ def get_parent_text(client, channel_id: str, thread_ts: str) -> str | None:
     return None
 
 
-def process_files(files: list[dict]) -> list[str]:
+def process_files(files: list[dict], channel_name: str) -> list[str]:
     """Download files from Slack and upload to Google Drive. Returns list of Drive links."""
     links = []
     for file_info in files:
-        link = drive.download_from_slack_and_upload(file_info, config.SLACK_BOT_TOKEN)
+        link = drive.download_from_slack_and_upload(file_info, config.SLACK_BOT_TOKEN, channel_name)
         if link:
             links.append(link)
     return links
@@ -125,7 +125,7 @@ def handle_message(event, client, logger):
         parent_text = get_parent_text(client, channel_id, thread_ts)
 
     # Process file attachments
-    attachment_links = process_files(files) if files else []
+    attachment_links = process_files(files, channel_name) if files else []
 
     # Log to Google Sheets (deduplication handled inside)
     try:

@@ -21,13 +21,61 @@ class DriveHandler:
             config.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=SCOPES
         )
         self.service = build("drive", "v3", credentials=creds)
-        self.folder_id = config.GOOGLE_DRIVE_FOLDER_ID
+        self.root_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
+        # Cache: channel_name -> folder_id
+        self._channel_folders: dict[str, str] = {}
 
-    def upload_file(self, file_name: str, file_bytes: bytes, mime_type: str) -> str:
-        """Upload a file to Google Drive and return its shareable link."""
+    def _get_or_create_channel_folder(self, channel_name: str) -> str:
+        """Get or create a subfolder for the channel under the root folder."""
+        if channel_name in self._channel_folders:
+            return self._channel_folders[channel_name]
+
+        # Search for existing folder
+        query = (
+            f"name = '#{channel_name}' and "
+            f"'{self.root_folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.folder' and "
+            f"trashed = false"
+        )
+        results = self.service.files().list(
+            q=query, fields="files(id, name)", pageSize=1
+        ).execute()
+        files = results.get("files", [])
+
+        if files:
+            folder_id = files[0]["id"]
+        else:
+            # Create new folder
+            folder_metadata = {
+                "name": f"#{channel_name}",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [self.root_folder_id],
+            }
+            folder = self.service.files().create(
+                body=folder_metadata, fields="id"
+            ).execute()
+            folder_id = folder["id"]
+
+            # Make folder readable by anyone with the link
+            self.service.permissions().create(
+                fileId=folder_id,
+                body={"type": "anyone", "role": "reader"},
+            ).execute()
+
+            logger.info(f"Created Drive folder: #{channel_name}")
+
+        self._channel_folders[channel_name] = folder_id
+        return folder_id
+
+    def upload_file(
+        self, file_name: str, file_bytes: bytes, mime_type: str, channel_name: str
+    ) -> str:
+        """Upload a file to the channel's folder and return its shareable link."""
+        folder_id = self._get_or_create_channel_folder(channel_name)
+
         file_metadata = {
             "name": file_name,
-            "parents": [self.folder_id],
+            "parents": [folder_id],
         }
         media = MediaIoBaseUpload(
             io.BytesIO(file_bytes), mimetype=mime_type, resumable=True
@@ -44,11 +92,11 @@ class DriveHandler:
             body={"type": "anyone", "role": "reader"},
         ).execute()
 
-        logger.info(f"Uploaded to Drive: {file_name} -> {uploaded['webViewLink']}")
+        logger.info(f"Uploaded to Drive: #{channel_name}/{file_name} -> {uploaded['webViewLink']}")
         return uploaded["webViewLink"]
 
     def download_from_slack_and_upload(
-        self, file_info: dict, slack_token: str
+        self, file_info: dict, slack_token: str, channel_name: str
     ) -> str | None:
         """Download a file from Slack and upload it to Google Drive.
 
@@ -81,7 +129,7 @@ class DriveHandler:
         mime_type = file_info.get("mimetype", "application/octet-stream")
 
         try:
-            return self.upload_file(file_name, resp.content, mime_type)
+            return self.upload_file(file_name, resp.content, mime_type, channel_name)
         except Exception as e:
             logger.error(f"Failed to upload to Drive: {e}")
             return None
