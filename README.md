@@ -255,8 +255,8 @@ SLACK_APP_TOKEN=xapp-x-xxxxxxxxxx-xxxxxxxxxxxxx-xxxxxxxx
 
 # Google（Step 2で作成・取得した情報）
 GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json
-GOOGLE_SPREADSHEET_ID=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms
-GOOGLE_DRIVE_FOLDER_ID=0BwwA4oUTeiV1TGRPeTVjaWRDY1E
+GOOGLE_SPREADSHEET_ID=your_spreadsheet_id_here
+GOOGLE_DRIVE_FOLDER_ID=your_folder_id_here
 
 # タイムゾーン
 TIMEZONE=Asia/Tokyo
