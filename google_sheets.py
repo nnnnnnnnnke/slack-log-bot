@@ -35,6 +35,7 @@ HEADER_ROW = [
 ]
 
 # Column indices (1-indexed)
+ATTACHMENT_COLUMN = 6
 TS_COLUMN = 8
 THREAD_TS_COLUMN = 9
 
@@ -476,6 +477,89 @@ class SheetsHandler:
             thread_ts or "",
         ]
 
+    # ── Backup / Reset / Cache ──
+
+    def clear_cache(self, channel_name: str | None = None):
+        """Clear in-memory caches. If channel_name is None, clear all."""
+        if channel_name:
+            self._sheet_cache.pop(channel_name, None)
+            self._existing_ts.pop(channel_name, None)
+            self._private_spreadsheets.pop(channel_name, None)
+            self._formatted_sheets.discard(channel_name)
+        else:
+            self._sheet_cache.clear()
+            self._existing_ts.clear()
+            self._private_spreadsheets.clear()
+            self._formatted_sheets.clear()
+
+    def backup_and_reset_channel(
+        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None,
+    ) -> str | None:
+        """Backup the channel tab, delete it, and clear cache. Returns backup tab name."""
+        now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
+        backup_name = f"{channel_name}_bak_{now_str}"
+
+        if is_private:
+            if channel_name not in self._private_spreadsheets:
+                # Try to find it
+                try:
+                    self._get_or_create_private_sheet(channel_name, member_emails or [])
+                except Exception:
+                    return None
+            if channel_name not in self._private_spreadsheets:
+                return None
+            ss = self._private_spreadsheets[channel_name]
+            try:
+                ws = ss.worksheet(channel_name)
+                ss.duplicate_sheet(ws.id, new_sheet_name=backup_name)
+                ss.del_worksheet(ws)
+                logger.info(f"Backup & reset private #{channel_name} -> {backup_name}")
+            except Exception as e:
+                logger.error(f"Failed to backup/reset #{channel_name}: {e}")
+                return None
+        else:
+            try:
+                ws = self.public_spreadsheet.worksheet(channel_name)
+                self.public_spreadsheet.duplicate_sheet(ws.id, new_sheet_name=backup_name)
+                self.public_spreadsheet.del_worksheet(ws)
+                logger.info(f"Backup & reset public #{channel_name} -> {backup_name}")
+            except gspread.exceptions.WorksheetNotFound:
+                return None
+            except Exception as e:
+                logger.error(f"Failed to backup/reset #{channel_name}: {e}")
+                return None
+
+        self.clear_cache(channel_name)
+        return backup_name
+
+    def backup_and_reset_all(self) -> list[str]:
+        """Backup and delete all channel tabs in the public spreadsheet. Returns backup names."""
+        now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
+        backup_names = []
+
+        worksheets = self.public_spreadsheet.worksheets()
+        # Ensure a default tab exists (Sheets requires at least one)
+        default_exists = any(ws.title == "シート1" for ws in worksheets)
+        if not default_exists:
+            self.public_spreadsheet.add_worksheet(title="シート1", rows=1, cols=1)
+
+        for ws in worksheets:
+            if ws.title == "シート1" or ws.title.endswith(f"_bak_{now_str}"):
+                continue
+            if ws.title.startswith("_bak_") or "_bak_" in ws.title:
+                continue
+            backup_name = f"{ws.title}_bak_{now_str}"
+            try:
+                self.public_spreadsheet.duplicate_sheet(ws.id, new_sheet_name=backup_name)
+                self.public_spreadsheet.del_worksheet(ws)
+                backup_names.append(backup_name)
+                logger.info(f"Backup & reset: {ws.title} -> {backup_name}")
+            except Exception as e:
+                logger.error(f"Failed to backup/reset {ws.title}: {e}")
+
+        self.clear_cache()
+        return backup_names
+
     def get_spreadsheet_url(self, channel_name: str, is_private: bool = False) -> str | None:
         """Return the spreadsheet URL for a channel."""
         if is_private and channel_name in self._private_spreadsheets:
@@ -534,6 +618,25 @@ class SheetsHandler:
             f"Logged: #{channel_name} {display_name} (@{username}) ({self._ts_to_datetime(ts)})"
         )
         return True
+
+    def update_attachment_links(
+        self, channel_name: str, ts: str, attachment_links: list[str],
+        is_private: bool = False, member_emails: list[str] | None = None,
+    ):
+        """Update the attachment column for a message identified by TS."""
+        if not attachment_links:
+            return
+        try:
+            worksheet = self._get_worksheet(channel_name, is_private, member_emails)
+            ts_values = worksheet.col_values(TS_COLUMN)
+            for i, val in enumerate(ts_values):
+                if val == ts:
+                    row_num = i + 1  # 1-indexed
+                    worksheet.update_cell(row_num, ATTACHMENT_COLUMN, "\n".join(attachment_links))
+                    logger.info(f"Updated attachments for ts={ts} in #{channel_name}")
+                    return
+        except Exception as e:
+            logger.error(f"Failed to update attachment links: {e}")
 
     def _find_thread_insert_position(self, worksheet: gspread.Worksheet, thread_ts: str) -> int | None:
         try:

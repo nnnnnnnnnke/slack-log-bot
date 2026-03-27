@@ -77,8 +77,7 @@ def handle_message(event, client, logger):
     display_name, username, _ = get_user_info(client, user_id)
     permalink = get_permalink(client, channel_id, ts)
 
-    attachment_links = process_files(files, channel_name, is_private, member_emails) if files else []
-
+    # Log message immediately (without waiting for file uploads)
     try:
         sheets.insert_message(
             channel_name=channel_name,
@@ -87,13 +86,24 @@ def handle_message(event, client, logger):
             text=text,
             ts=ts,
             thread_ts=thread_ts,
-            attachment_links=attachment_links,
+            attachment_links=[],
             permalink=permalink,
             is_private=is_private,
             member_emails=member_emails,
         )
     except Exception as e:
         logger.error(f"Failed to log message to Sheets: {e}")
+
+    # Upload files in background and update attachment column
+    if files:
+        def upload_files():
+            links = process_files(files, channel_name, is_private, member_emails)
+            if links:
+                sheets.update_attachment_links(
+                    channel_name, ts, links, is_private, member_emails,
+                )
+
+        threading.Thread(target=upload_files, daemon=True).start()
 
 
 @app.event("file_shared")
@@ -104,9 +114,12 @@ def handle_file_shared(event, client, logger):
 @app.event("app_mention")
 def handle_mention(event, client, say, logger):
     """Handle @bot mentions. Commands:
-    @bot           → Show spreadsheet URL
-    @bot backfill  → Collect past messages (default 90 days)
-    @bot backfill 30 → Collect past 30 days
+    @bot              → Show spreadsheet URL + help
+    @bot backfill     → Collect past messages (default 90 days)
+    @bot backfill 30  → Collect past 30 days
+    @bot reset        → Backup & reset this channel's sheet
+    @bot reset all    → Backup & reset all public channel sheets
+    @bot clear cache  → Clear in-memory caches
     """
     channel_id = event.get("channel", "")
     text = event.get("text", "")
@@ -144,13 +157,65 @@ def handle_mention(event, client, say, logger):
                 )
 
         threading.Thread(target=run_backfill, daemon=True).start()
-    else:
-        # Show spreadsheet URL
+
+    elif cleaned == "reset all" or cleaned.startswith("reset"):
+        if not is_private:
+            say(":no_entry_sign: パブリックチャンネルのリセットは無効です。プライベートチャンネルでのみ使用できます。")
+            return
+
+        member_emails = get_member_emails(client, channel_id)
+        say(f":recycle: `#{channel_name}` のシートをバックアップ＆リセットします...")
+
+        def run_reset():
+            try:
+                backup_name = sheets.backup_and_reset_channel(
+                    channel_name, is_private, member_emails,
+                )
+                if backup_name:
+                    client.chat_postMessage(
+                        channel=channel_id,
+                        text=f":white_check_mark: `#{channel_name}` をリセットしました。バックアップ: `{backup_name}`",
+                    )
+                else:
+                    client.chat_postMessage(
+                        channel=channel_id,
+                        text=f":white_check_mark: `#{channel_name}` のシートが見つかりませんでした（既にクリーンな状態です）。",
+                    )
+            except Exception as e:
+                logger.error(f"Reset failed: {e}")
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f":x: リセット中にエラーが発生しました: {e}",
+                )
+
+        threading.Thread(target=run_reset, daemon=True).start()
+
+    elif cleaned in ("clear cache", "cache clear", "キャッシュクリア"):
+        sheets.clear_cache()
+        say(":broom: キャッシュをクリアしました。")
+
+    elif cleaned == "url":
         url = sheets.get_spreadsheet_url(channel_name, is_private)
         if url:
             say(f":memo: `#{channel_name}` のログはこちら:\n{url}")
         else:
             say(f":memo: `#{channel_name}` のログはまだ作成されていません。メッセージが投稿されると自動的に作成されます。")
+
+    elif cleaned == "help" or cleaned == "":
+        url = sheets.get_spreadsheet_url(channel_name, is_private)
+        url_line = f"\n:link: {url}" if url else ""
+        say(
+            f":memo: *`#{channel_name}` のログBot*{url_line}\n\n"
+            f"*コマンド一覧:*\n"
+            f"• `@Log Bot url` — スプレッドシートURL表示\n"
+            f"• `@Log Bot backfill` — 過去90日分のログを収集\n"
+            f"• `@Log Bot backfill 30` — 過去N日分を収集\n"
+            f"• `@Log Bot reset` — このチャンネルのシートをバックアップ＆リセット（プライベートのみ）\n"
+            f"• `@Log Bot clear cache` — キャッシュクリア"
+        )
+
+    else:
+        say(f":thinking_face: 不明なコマンドです。`@Log Bot help` でコマンド一覧を確認できます。")
 
 
 def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bool, days: int):

@@ -134,7 +134,7 @@ class DriveHandler:
             "parents": [folder_id],
         }
         media = MediaIoBaseUpload(
-            io.BytesIO(file_bytes), mimetype=mime_type, resumable=True
+            io.BytesIO(file_bytes), mimetype=mime_type, resumable=False
         )
         uploaded = (
             self.service.files()
