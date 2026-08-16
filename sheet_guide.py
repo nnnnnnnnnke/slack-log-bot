@@ -51,7 +51,7 @@ GUIDE_ROWS: list[tuple[str, str]] = [
     (f"{SECTION_PREFIX} 編集するときの注意", ""),
     ("", "行の削除・並べ替えはしないでください。"),
     ("", "bot は「メッセージTS」列を見て重複を判定し、スレッド返信の挿入位置を決めています。"),
-    ("", "行を消しても自動では戻りません（@Log Bot clear cache のあと backfill が必要です）。"),
+    ("", "行を消しても自動では戻りません（bot を再起動してから backfill が必要です）。"),
     ("", "自由に加工したい場合は、ファイルのコピーを作ってそちらを編集してください。"),
     ("", ""),
     (f"{SECTION_PREFIX} Slack からの操作", ""),
@@ -59,9 +59,6 @@ GUIDE_ROWS: list[tuple[str, str]] = [
     ("@Log Bot url", "このシートのURLを表示"),
     ("@Log Bot backfill", "そのチャンネルの過去90日分を収集"),
     ("@Log Bot backfill 30", "過去N日分を収集（日数指定）"),
-    ("@Log Bot share", "共有設定をチャンネルメンバーに合わせて更新"),
-    ("@Log Bot reset", "シートをバックアップして初期化"),
-    ("@Log Bot clear cache", "bot のメモリ内キャッシュをクリア"),
     ("", ""),
     ("", "── このタブは setup.py が自動生成しています。編集しても bot の動作には影響しません。"),
 ]

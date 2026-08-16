@@ -1057,45 +1057,6 @@ class SheetsHandler:
             self._channel_spreadsheets.clear()
             self._formatted_sheets.clear()
 
-    def backup_and_reset_channel(
-        self, channel_name: str, member_emails: list[str] | None = None,
-        channel_id: str = "",
-    ) -> str | None:
-        """Backup the channel tab, delete it, and clear cache. Returns backup tab name."""
-        with self._lock:
-            return self._backup_and_reset_channel_locked(
-                channel_name, member_emails, channel_id,
-            )
-
-    def _backup_and_reset_channel_locked(
-        self, channel_name: str, member_emails: list[str] | None = None,
-        channel_id: str = "",
-    ) -> str | None:
-        now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
-        backup_name = f"{channel_name}_bak_{now_str}"
-
-        try:
-            ss = self._get_or_create_channel_spreadsheet(
-                channel_name, member_emails, channel_id
-            )
-        except Exception as e:
-            logger.error(f"Failed to open #{channel_name}: {e}")
-            return None
-
-        try:
-            ws = ss.worksheet(channel_name)
-            ss.duplicate_sheet(ws.id, new_sheet_name=backup_name)
-            ss.del_worksheet(ws)
-            logger.info(f"Backup & reset #{channel_name} -> {backup_name}")
-        except gspread.exceptions.WorksheetNotFound:
-            return None
-        except Exception as e:
-            logger.error(f"Failed to backup/reset #{channel_name}: {e}")
-            return None
-
-        self.clear_cache(channel_name)
-        return backup_name
-
     def recorded_ts(
         self, channel_name: str,
         member_emails: list[str] | None = None,

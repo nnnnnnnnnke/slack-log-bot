@@ -207,9 +207,6 @@ def handle_mention(event, client, say, logger):
     @bot              → Show spreadsheet URL + help
     @bot backfill     → Collect past messages (default 90 days)
     @bot backfill 30  → Collect past 30 days
-    @bot share        → Re-sync the sheet's readers with the channel members
-    @bot reset        → Backup & reset this channel's sheet
-    @bot clear cache  → Clear in-memory caches
     """
     channel_id = event.get("channel", "")
     text = event.get("text", "")
@@ -246,61 +243,6 @@ def handle_mention(event, client, say, logger):
 
         threading.Thread(target=run_backfill, daemon=True).start()
 
-    elif cleaned.startswith("reset"):
-        member_emails = get_member_emails(client, channel_id)
-        say(f":recycle: `#{channel_name}` のシートをバックアップ＆リセットします...")
-
-        def run_reset():
-            try:
-                backup_name = sheets.backup_and_reset_channel(
-                    channel_name, member_emails, channel_id,
-                )
-                if backup_name:
-                    client.chat_postMessage(
-                        channel=channel_id,
-                        text=f":white_check_mark: `#{channel_name}` をリセットしました。バックアップ: `{backup_name}`",
-                    )
-                else:
-                    client.chat_postMessage(
-                        channel=channel_id,
-                        text=f":white_check_mark: `#{channel_name}` のシートが見つかりませんでした（既にクリーンな状態です）。",
-                    )
-            except Exception as e:
-                logger.error(f"Reset failed: {e}")
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f":x: リセット中にエラーが発生しました: {e}",
-                )
-
-        threading.Thread(target=run_reset, daemon=True).start()
-
-    elif cleaned in ("share", "sync", "共有"):
-        say(f":arrows_counterclockwise: `#{channel_name}` の共有設定をメンバーに合わせます...")
-
-        def run_share():
-            try:
-                granted, _ = _sync_access(client, channel_id, channel_name)
-                emails = get_member_emails(client, channel_id)
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=(
-                        f":white_check_mark: `#{channel_name}` の共有を更新しました。"
-                        f"\n新たに共有: {granted} 件 / 共有対象のメンバー: {len(emails)} 人"
-                    ),
-                )
-            except Exception as e:
-                logger.error(f"Share sync failed: {e}")
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f":x: 共有の更新でエラーが発生しました: {e}",
-                )
-
-        threading.Thread(target=run_share, daemon=True).start()
-
-    elif cleaned in ("clear cache", "cache clear", "キャッシュクリア"):
-        sheets.clear_cache()
-        say(":broom: キャッシュをクリアしました。")
-
     elif cleaned == "url":
         url = sheets.get_spreadsheet_url(channel_name)
         if url:
@@ -316,10 +258,7 @@ def handle_mention(event, client, say, logger):
             f"*コマンド一覧:*\n"
             f"• `@Log Bot url` — スプレッドシートURL表示\n"
             f"• `@Log Bot backfill` — 過去90日分のログを収集\n"
-            f"• `@Log Bot backfill 30` — 過去N日分を収集\n"
-            f"• `@Log Bot share` — 共有設定をメンバーに合わせて更新\n"
-            f"• `@Log Bot reset` — このチャンネルのシートをバックアップ＆リセット\n"
-            f"• `@Log Bot clear cache` — キャッシュクリア"
+            f"• `@Log Bot backfill 30` — 過去N日分を収集"
         )
 
     else:
