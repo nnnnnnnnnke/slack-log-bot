@@ -26,10 +26,15 @@ import google_auth
 ENV_FILE = ".env"
 ENV_EXAMPLE = ".env.example"
 
-# One folder holds everything the bot owns: the shared spreadsheet, the
-# per-private-channel spreadsheets, and the attachments folder.
-DRIVE_FOLDER_NAME = "Slack ログ"
-SPREADSHEET_NAME = "Slack ログ - パブリックチャンネル"
+# One folder holds everything the bot owns for a workspace: the index
+# spreadsheet, the per-channel spreadsheets, and the attachments folder.
+#
+# The workspace name is part of both, because one Google account can run the
+# bot for several Slack workspaces. Without it the second workspace would find
+# the first one's folder by name and adopt it, and two channels that happen to
+# share a name would then write into the same spreadsheet.
+DRIVE_FOLDER_NAME = "Slack ログ - {workspace}"
+SPREADSHEET_NAME = "Slack ログ 索引 - {workspace}"
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 # Must match google_drive.ATTACHMENTS_FOLDER_NAME (declared here too so this
@@ -209,7 +214,8 @@ def check_slack(env: dict[str, str]) -> dict[str, str]:
         print("\n  もう一度入力してください。")
         env["SLACK_BOT_TOKEN"] = ""
 
-    ok(f"接続成功: {resp.get('team')} / bot={resp.get('user')}")
+    workspace = resp.get("team") or "workspace"
+    ok(f"接続成功: {workspace} / bot={resp.get('user')}")
 
     # Header names are case-insensitive, so normalise before looking one up.
     headers = {k.lower(): v for k, v in (resp.headers or {}).items()}
@@ -228,7 +234,7 @@ def check_slack(env: dict[str, str]) -> dict[str, str]:
             fail("スコープ不足のため中断しました。")
         ok(f"必要なスコープ {len(REQUIRED_SLACK_SCOPES)} 個すべてを確認")
 
-    return env
+    return env, workspace
 
 
 # ── Step 2: Google OAuth2 ──
@@ -351,7 +357,7 @@ def organise_attachment_folders(drive, root_folder_id: str) -> int:
     return moved
 
 
-def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
+def provision_google_resources(env: dict[str, str], workspace: str) -> dict[str, str]:
     import gspread
     from googleapiclient.discovery import build
 
@@ -368,11 +374,12 @@ def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
     if env.get("GOOGLE_DRIVE_FOLDER_ID"):
         ok(f"既存の Drive フォルダを使用: {env['GOOGLE_DRIVE_FOLDER_ID']}")
     else:
+        folder_name = DRIVE_FOLDER_NAME.format(workspace=workspace)
         folder_id, created = find_or_create(
-            drive, DRIVE_FOLDER_NAME, "application/vnd.google-apps.folder"
+            drive, folder_name, "application/vnd.google-apps.folder"
         )
         env["GOOGLE_DRIVE_FOLDER_ID"] = folder_id
-        ok(f"Drive フォルダを{'作成' if created else '検出'}: {DRIVE_FOLDER_NAME}")
+        ok(f"Drive フォルダを{'作成' if created else '検出'}: {folder_name}")
         print(f"      https://drive.google.com/drive/folders/{folder_id}")
 
     folder_id = env["GOOGLE_DRIVE_FOLDER_ID"]
@@ -380,12 +387,13 @@ def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
     if env.get("GOOGLE_SPREADSHEET_ID"):
         ok(f"既存のスプレッドシートを使用: {env['GOOGLE_SPREADSHEET_ID']}")
     else:
+        ss_name = SPREADSHEET_NAME.format(workspace=workspace)
         ss_id, created = find_or_create(
-            drive, SPREADSHEET_NAME, "application/vnd.google-apps.spreadsheet",
+            drive, ss_name, "application/vnd.google-apps.spreadsheet",
             parent=folder_id,
         )
         env["GOOGLE_SPREADSHEET_ID"] = ss_id
-        ok(f"スプレッドシートを{'作成' if created else '検出'}: {SPREADSHEET_NAME}")
+        ok(f"スプレッドシートを{'作成' if created else '検出'}: {ss_name}")
         print(f"      https://docs.google.com/spreadsheets/d/{ss_id}/edit")
 
     # Spreadsheets made before this was folded in sit at My Drive root.
@@ -453,12 +461,12 @@ def main():
     print("\033[1mSlack Log Bot セットアップ\033[0m")
 
     env = read_env()
-    env = check_slack(env)
+    env, workspace = check_slack(env)
     write_env(env)
 
     run_google_auth(reauth=args.reauth)
 
-    env = provision_google_resources(env)
+    env = provision_google_resources(env, workspace)
     write_env(env)
 
     verify(env)

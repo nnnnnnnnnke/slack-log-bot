@@ -289,6 +289,35 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 
 ---
 
+### 複数のワークスペースで使う場合
+
+1つのワークスペースにつき **1ディレクトリ・1プロセス**です。
+`setup.py` が作る Drive フォルダと索引スプレッドシートには**ワークスペース名が入る**ため、
+同じGoogleアカウントでも混ざりません。
+
+```
+📁 Slack ログ - 研究室        ← ワークスペースA
+📁 Slack ログ - サークル      ← ワークスペースB
+```
+
+> 名前を分けていないと、2つ目のワークスペースが1つ目のフォルダを名前で見つけて再利用し、
+> 同名チャンネル（`#general` など）のログが同じスプレッドシートに混ざります。
+
+2つ目以降は、別ディレクトリにクローンして `setup.py` を実行します。
+Google の認証情報は使い回せるので、コピーすれば Step 2 とブラウザ認証を省けます。
+
+```bash
+git clone https://github.com/nnnnnnnnnke/slack-log-bot.git ~/Documents/slack-log-bot-B
+cd ~/Documents/slack-log-bot-B
+cp ~/Documents/slack-log-bot/client_secret.json ~/Documents/slack-log-bot/drive_token.json .
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python setup.py
+```
+
+Slack App は**ワークスペースごとに作成が必要**です（Step 1 をそのワークスペースで実施）。
+
+---
+
 ### Step 3: botのインストール
 
 ```bash
