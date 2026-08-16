@@ -19,10 +19,9 @@ from slack_sdk import WebClient
 import config
 from google_sheets import SheetsHandler
 from google_drive import DriveHandler
+from collector import fetch_channel_messages
 from slack_utils import (
     get_member_emails,
-    get_user_info,
-    resolve_mentions,
     install_retry_handlers,
 )
 
@@ -39,6 +38,10 @@ def backfill(channel_filter: str | None = None, days: int = 90):
     install_retry_handlers(client)
     sheets = SheetsHandler()
     drive = DriveHandler()
+
+    # The bot's own replies ("collection started", "here is the log") are
+    # posted with a bot token, which carries no subtype to filter on.
+    bot_user_ids = (client.auth_test().get("user_id", ""),)
 
     # Get channels
     channels = []
@@ -84,100 +87,10 @@ def backfill(channel_filter: str | None = None, days: int = 90):
         # Drive files do not, so each run leaves another copy behind.
         known_ts = sheets.recorded_ts(ch_name, member_emails)
 
-        # Phase 1: Collect all messages
-        collected: list[dict] = []
-        cursor = None
-
-        while True:
-            try:
-                resp = client.conversations_history(
-                    channel=ch_id, oldest=oldest_ts, limit=200, cursor=cursor
-                )
-            except Exception as e:
-                logger.error(f"Failed to fetch history for #{ch_name}: {e}")
-                break
-
-            messages = resp.get("messages", [])
-
-            for msg in messages:
-                subtype = msg.get("subtype")
-                if subtype in ("bot_message", "channel_join", "channel_leave"):
-                    continue
-
-                user_id = msg.get("user", "")
-                if not user_id:
-                    continue
-
-                ts = msg.get("ts", "")
-                text = msg.get("text", "")
-                files = msg.get("files", [])
-
-                _, username, _ = get_user_info(client, user_id)
-                text = resolve_mentions(client, text)
-
-                attachments = []
-                if ts not in known_ts:
-                    for f in files:
-                        link = drive.download_from_slack_and_upload(
-                            f, config.SLACK_BOT_TOKEN, ch_name,
-                            member_emails,
-                        )
-                        if link:
-                            attachments.append(link)
-
-                collected.append({
-                    "username": username,
-                    "text": text,
-                    "ts": ts,
-                    "thread_ts": None,
-                    "attachments": attachments,
-                })
-
-                if msg.get("reply_count", 0) > 0:
-                    try:
-                        thread_resp = client.conversations_replies(
-                            channel=ch_id, ts=ts, limit=200
-                        )
-                        replies = thread_resp.get("messages", [])
-
-                        for reply in replies[1:]:
-                            r_user = reply.get("user", "")
-                            if not r_user:
-                                continue
-                            if reply.get("subtype") in ("bot_message",):
-                                continue
-
-                            r_ts = reply.get("ts", "")
-                            r_text = reply.get("text", "")
-                            r_files = reply.get("files", [])
-
-                            _, r_username, _ = get_user_info(client, r_user)
-                            r_text = resolve_mentions(client, r_text)
-
-                            r_attachments = []
-                            if r_ts not in known_ts:
-                                for f in r_files:
-                                    link = drive.download_from_slack_and_upload(
-                                        f, config.SLACK_BOT_TOKEN, ch_name,
-                                        member_emails,
-                                    )
-                                    if link:
-                                        r_attachments.append(link)
-
-                            collected.append({
-                                "username": r_username,
-                                "text": r_text,
-                                "ts": r_ts,
-                                "thread_ts": ts,
-                                "attachments": r_attachments,
-                            })
-
-                    except Exception as e:
-                        logger.error(f"Failed to fetch thread replies: {e}")
-
-            cursor = resp.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
-                break
+        collected = fetch_channel_messages(
+            client, drive, ch_id, ch_name, oldest_ts, known_ts, member_emails,
+            skip_user_ids=bot_user_ids,
+        )
 
         # Phase 2: Write grouped by thread
         new_count, skip_count = sheets.write_messages_grouped(
