@@ -158,8 +158,18 @@ CHANNEL_ID_PROPERTY = "slackChannelId"
 
 JST = timezone(timedelta(hours=9))
 
-# Thread reply prefix
+# Thread reply marker, and the indent that keeps the rest of a multi-line
+# reply aligned under it instead of starting back at the left edge.
 THREAD_PREFIX = "└ "
+THREAD_INDENT = " " * len(THREAD_PREFIX)
+
+
+def mark_thread_reply(text: str) -> str:
+    """Prefix a reply with the thread marker, indenting its later lines."""
+    lines = text.split("\n")
+    return "\n".join(
+        [THREAD_PREFIX + lines[0]] + [THREAD_INDENT + line for line in lines[1:]]
+    )
 
 
 class SheetsHandler:
@@ -704,7 +714,7 @@ class SheetsHandler:
     ) -> list[str]:
         # Thread replies get a visual prefix
         is_reply = thread_ts and thread_ts != ts
-        display_text = f"{THREAD_PREFIX}{text}" if is_reply else text
+        display_text = mark_thread_reply(text) if is_reply else text
 
         return [
             self._ts_to_datetime(ts),
