@@ -26,8 +26,10 @@ import google_auth
 ENV_FILE = ".env"
 ENV_EXAMPLE = ".env.example"
 
-SPREADSHEET_NAME = "Slack ログ"
-DRIVE_FOLDER_NAME = "Slack添付ファイル"
+# One folder holds everything the bot owns: the shared spreadsheet, the
+# per-private-channel spreadsheets, and the per-channel attachment folders.
+DRIVE_FOLDER_NAME = "Slack ログ"
+SPREADSHEET_NAME = "Slack ログ - パブリックチャンネル"
 
 # Scopes the bot needs; must stay in sync with slack-app-manifest.yml
 REQUIRED_SLACK_SCOPES = [
@@ -292,6 +294,21 @@ def find_or_create(drive, name: str, mime_type: str, parent: str | None = None) 
     return created["id"], True
 
 
+def move_into_folder(drive, file_id: str, folder_id: str) -> bool:
+    """Put a file under folder_id. Returns True if it actually moved."""
+    meta = drive.files().get(fileId=file_id, fields="parents").execute()
+    parents = meta.get("parents", [])
+    if folder_id in parents:
+        return False
+    drive.files().update(
+        fileId=file_id,
+        addParents=folder_id,
+        removeParents=",".join(parents),
+        fields="id",
+    ).execute()
+    return True
+
+
 def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
     import gspread
     from googleapiclient.discovery import build
@@ -303,15 +320,38 @@ def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
     creds = google_auth.load_credentials()
     drive = build("drive", "v3", credentials=creds)
 
+    # The folder comes first so the spreadsheet can be created inside it.
+    # Private channel spreadsheets and attachment folders already live here,
+    # so this keeps everything the bot owns in one place.
+    if env.get("GOOGLE_DRIVE_FOLDER_ID"):
+        ok(f"既存の Drive フォルダを使用: {env['GOOGLE_DRIVE_FOLDER_ID']}")
+    else:
+        folder_id, created = find_or_create(
+            drive, DRIVE_FOLDER_NAME, "application/vnd.google-apps.folder"
+        )
+        env["GOOGLE_DRIVE_FOLDER_ID"] = folder_id
+        ok(f"Drive フォルダを{'作成' if created else '検出'}: {DRIVE_FOLDER_NAME}")
+        print(f"      https://drive.google.com/drive/folders/{folder_id}")
+
+    folder_id = env["GOOGLE_DRIVE_FOLDER_ID"]
+
     if env.get("GOOGLE_SPREADSHEET_ID"):
         ok(f"既存のスプレッドシートを使用: {env['GOOGLE_SPREADSHEET_ID']}")
     else:
         ss_id, created = find_or_create(
-            drive, SPREADSHEET_NAME, "application/vnd.google-apps.spreadsheet"
+            drive, SPREADSHEET_NAME, "application/vnd.google-apps.spreadsheet",
+            parent=folder_id,
         )
         env["GOOGLE_SPREADSHEET_ID"] = ss_id
         ok(f"スプレッドシートを{'作成' if created else '検出'}: {SPREADSHEET_NAME}")
         print(f"      https://docs.google.com/spreadsheets/d/{ss_id}/edit")
+
+    # Spreadsheets made before this was folded in sit at My Drive root.
+    try:
+        if move_into_folder(drive, env["GOOGLE_SPREADSHEET_ID"], folder_id):
+            ok("スプレッドシートを Drive フォルダに移動")
+    except Exception as e:
+        warn(f"スプレッドシートをフォルダに移動できませんでした: {e}")
 
     # Google leaves an empty default sheet behind; make it the guide.
     try:
@@ -322,16 +362,6 @@ def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
             ok("説明タブは作成済み")
     except Exception as e:
         warn(f"説明タブを作成できませんでした: {e}")
-
-    if env.get("GOOGLE_DRIVE_FOLDER_ID"):
-        ok(f"既存の Drive フォルダを使用: {env['GOOGLE_DRIVE_FOLDER_ID']}")
-    else:
-        folder_id, created = find_or_create(
-            drive, DRIVE_FOLDER_NAME, "application/vnd.google-apps.folder"
-        )
-        env["GOOGLE_DRIVE_FOLDER_ID"] = folder_id
-        ok(f"Drive フォルダを{'作成' if created else '検出'}: {DRIVE_FOLDER_NAME}")
-        print(f"      https://drive.google.com/drive/folders/{folder_id}")
 
     return env
 
