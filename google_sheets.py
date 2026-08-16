@@ -553,6 +553,20 @@ class SheetsHandler:
         self.clear_cache(channel_name)
         return backup_name
 
+    def recorded_ts(
+        self, channel_name: str, is_private: bool = False,
+        member_emails: list[str] | None = None,
+    ) -> set[str]:
+        """Message TSs already in the sheet for this channel.
+
+        Collectors use this to skip re-downloading and re-uploading the
+        attachments of messages they already have: dedup happens at write
+        time, so those uploads are discarded, but Drive keeps every copy.
+        """
+        with self._lock:
+            worksheet = self._get_worksheet(channel_name, is_private, member_emails)
+            return set(self._load_existing_ts(channel_name, worksheet))
+
     def get_spreadsheet_url(self, channel_name: str, is_private: bool = False) -> str | None:
         """Return the spreadsheet URL for a channel."""
         if is_private and channel_name in self._private_spreadsheets:

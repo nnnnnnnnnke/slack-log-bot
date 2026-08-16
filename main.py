@@ -219,6 +219,11 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
     """Collect past messages for a single channel."""
     member_emails = get_member_emails(client, channel_id) if is_private else None
 
+    # Attachments of messages already recorded would be downloaded and
+    # re-uploaded on every run: the rows get deduped at write time, the Drive
+    # files do not, so each run leaves another copy behind.
+    known_ts = sheets.recorded_ts(channel_name, is_private, member_emails)
+
     oldest = datetime.now(timezone.utc) - timedelta(days=days)
     oldest_ts = str(oldest.timestamp())
 
@@ -253,13 +258,14 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
             permalink = build_permalink(client, channel_id, ts)
 
             attachment_links = []
-            for f in files:
-                link = drive.download_from_slack_and_upload(
-                    f, config.SLACK_BOT_TOKEN, channel_name,
-                    is_private, member_emails,
-                )
-                if link:
-                    attachment_links.append(link)
+            if ts not in known_ts:
+                for f in files:
+                    link = drive.download_from_slack_and_upload(
+                        f, config.SLACK_BOT_TOKEN, channel_name,
+                        is_private, member_emails,
+                    )
+                    if link:
+                        attachment_links.append(link)
 
             collected.append({
                 "channel_name": channel_name,
@@ -295,13 +301,14 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
                         r_permalink = build_permalink(client, channel_id, r_ts, ts)
 
                         r_links = []
-                        for f in r_files:
-                            link = drive.download_from_slack_and_upload(
-                                f, config.SLACK_BOT_TOKEN, channel_name,
-                                is_private, member_emails,
-                            )
-                            if link:
-                                r_links.append(link)
+                        if r_ts not in known_ts:
+                            for f in r_files:
+                                link = drive.download_from_slack_and_upload(
+                                    f, config.SLACK_BOT_TOKEN, channel_name,
+                                    is_private, member_emails,
+                                )
+                                if link:
+                                    r_links.append(link)
 
                         collected.append({
                             "channel_name": channel_name,
