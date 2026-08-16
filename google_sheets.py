@@ -418,6 +418,57 @@ class SheetsHandler:
         except Exception as e:
             logger.warning(f"Failed to set row heights: {e}")
 
+    def thread_group_requests(
+        self, sheet_id: int, start_row: int, rows_data: list[dict]
+    ) -> list[dict]:
+        """Outline groups over each thread's replies, so a thread can be folded.
+
+        A group covers only the replies, never the parent: collapsing hides the
+        replies and leaves the message they answer in view. Runs are built from
+        consecutive reply rows, which is how a thread is written — parent first,
+        then its replies.
+        """
+        requests = []
+        run_start = None
+        for offset, msg in enumerate(rows_data):
+            is_reply = bool(msg.get("thread_ts")) and msg.get("thread_ts") != msg.get("ts")
+            if is_reply:
+                if run_start is None:
+                    run_start = start_row + offset
+            elif run_start is not None:
+                requests.append(self._group_request(sheet_id, run_start, start_row + offset))
+                run_start = None
+        if run_start is not None:
+            requests.append(
+                self._group_request(sheet_id, run_start, start_row + len(rows_data))
+            )
+        return requests
+
+    @staticmethod
+    def _group_request(sheet_id: int, first_row: int, after_row: int) -> dict:
+        return {
+            "addDimensionGroup": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": first_row - 1,   # 1-indexed row -> 0-indexed
+                    "endIndex": after_row - 1,
+                }
+            }
+        }
+
+    def apply_thread_groups(
+        self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
+        start_row: int, rows_data: list[dict],
+    ):
+        requests = self.thread_group_requests(worksheet.id, start_row, rows_data)
+        if not requests:
+            return
+        try:
+            _retry(spreadsheet.batch_update, {"requests": requests})
+        except Exception as e:
+            logger.warning(f"Failed to group thread replies: {e}")
+
     def _format_thread_rows(
         self,
         worksheet: gspread.Worksheet,
@@ -934,6 +985,11 @@ class SheetsHandler:
                     requests.append(
                         self._thread_background_request(worksheet.id, inserted_row)
                     )
+                    # Re-adding a group over the row extends the thread's
+                    # existing group rather than creating a second one.
+                    requests.append(
+                        self._group_request(worksheet.id, inserted_row, inserted_row + 1)
+                    )
                 try:
                     _retry(spreadsheet.batch_update, {"requests": requests})
                 except Exception as e:
@@ -1086,6 +1142,7 @@ class SheetsHandler:
                 except Exception as e:
                     logger.warning(f"Failed to link attachment names: {e}")
             self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
+            self.apply_thread_groups(worksheet, spreadsheet, start_row, ordered_msgs)
         else:
             logger.warning(
                 f"Could not determine written row range for #{channel_name}; "
