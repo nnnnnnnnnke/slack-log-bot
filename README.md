@@ -178,6 +178,7 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 
 | Scope | 用途 |
 |-------|------|
+| `app_mentions:read` | botへのメンションイベント受信（`app_mention` イベントに必須） |
 | `channels:history` | パブリックチャンネルのメッセージ履歴読み取り |
 | `channels:read` | チャンネル情報（名前等）の取得 |
 | `groups:history` | プライベートチャンネルのメッセージ履歴読み取り |

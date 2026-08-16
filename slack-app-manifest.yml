@@ -44,6 +44,8 @@ features:
 oauth_config:
   scopes:
     bot:
+      # bot へのメンションイベント受信（app_mention イベントに必須）
+      - app_mentions:read
       # パブリックチャンネルのメッセージ履歴読み取り
       - channels:history
       # チャンネル情報（名前等）の取得
