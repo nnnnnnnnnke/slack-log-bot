@@ -34,14 +34,13 @@ drive = DriveHandler()
 
 
 def process_files(
-    files: list[dict], channel_name: str,
-    is_private: bool, member_emails: list[str] | None
+    files: list[dict], channel_name: str, member_emails: list[str] | None
 ) -> list[str]:
     links = []
     for file_info in files:
         link = drive.download_from_slack_and_upload(
             file_info, config.SLACK_BOT_TOKEN, channel_name,
-            is_private, member_emails,
+            member_emails,
         )
         if link:
             links.append(link)
@@ -64,13 +63,9 @@ def handle_message(event, client, logger):
     if not user_id:
         return
 
-    # Resolve channel info (name + public/private)
-    ch_info = get_channel_info(client, channel_id)
-    channel_name = ch_info["name"]
-    is_private = ch_info["is_private"]
-
-    # For private channels, get member emails for sharing
-    member_emails = get_member_emails(client, channel_id) if is_private else None
+    channel_name = get_channel_info(client, channel_id)["name"]
+    # The channel's sheet is shared with exactly this channel's members.
+    member_emails = get_member_emails(client, channel_id)
 
     display_name, username, _ = get_user_info(client, user_id)
     permalink = build_permalink(client, channel_id, ts, thread_ts)
@@ -86,7 +81,6 @@ def handle_message(event, client, logger):
             thread_ts=thread_ts,
             attachment_links=[],
             permalink=permalink,
-            is_private=is_private,
             member_emails=member_emails,
         )
     except Exception as e:
@@ -95,10 +89,10 @@ def handle_message(event, client, logger):
     # Upload files in background and update attachment column
     if files:
         def upload_files():
-            links = process_files(files, channel_name, is_private, member_emails)
+            links = process_files(files, channel_name, member_emails)
             if links:
                 sheets.update_attachment_links(
-                    channel_name, ts, links, is_private, member_emails,
+                    channel_name, ts, links, member_emails,
                 )
 
         threading.Thread(target=upload_files, daemon=True).start()
@@ -115,15 +109,13 @@ def handle_mention(event, client, say, logger):
     @bot              → Show spreadsheet URL + help
     @bot backfill     → Collect past messages (default 90 days)
     @bot backfill 30  → Collect past 30 days
-    @bot reset        → Backup & reset this channel's sheet (private channels only)
+    @bot reset        → Backup & reset this channel's sheet
     @bot clear cache  → Clear in-memory caches
     """
     channel_id = event.get("channel", "")
     text = event.get("text", "")
 
-    ch_info = get_channel_info(client, channel_id)
-    channel_name = ch_info["name"]
-    is_private = ch_info["is_private"]
+    channel_name = get_channel_info(client, channel_id)["name"]
 
     # Parse command from mention text (strip bot mention)
     cleaned = re.sub(r"<@[A-Z0-9]+>", "", text).strip().lower()
@@ -141,7 +133,7 @@ def handle_mention(event, client, say, logger):
 
         def run_backfill():
             try:
-                _backfill_channel(client, channel_id, channel_name, is_private, days)
+                _backfill_channel(client, channel_id, channel_name, days)
                 client.chat_postMessage(
                     channel=channel_id,
                     text=f":white_check_mark: `#{channel_name}` のバックフィルが完了しました。",
@@ -156,17 +148,13 @@ def handle_mention(event, client, say, logger):
         threading.Thread(target=run_backfill, daemon=True).start()
 
     elif cleaned.startswith("reset"):
-        if not is_private:
-            say(":no_entry_sign: パブリックチャンネルのリセットは無効です。プライベートチャンネルでのみ使用できます。")
-            return
-
         member_emails = get_member_emails(client, channel_id)
         say(f":recycle: `#{channel_name}` のシートをバックアップ＆リセットします...")
 
         def run_reset():
             try:
                 backup_name = sheets.backup_and_reset_channel(
-                    channel_name, is_private, member_emails,
+                    channel_name, member_emails,
                 )
                 if backup_name:
                     client.chat_postMessage(
@@ -192,14 +180,14 @@ def handle_mention(event, client, say, logger):
         say(":broom: キャッシュをクリアしました。")
 
     elif cleaned == "url":
-        url = sheets.get_spreadsheet_url(channel_name, is_private)
+        url = sheets.get_spreadsheet_url(channel_name)
         if url:
             say(f":memo: `#{channel_name}` のログはこちら:\n{url}")
         else:
             say(f":memo: `#{channel_name}` のログはまだ作成されていません。メッセージが投稿されると自動的に作成されます。")
 
     elif cleaned == "help" or cleaned == "":
-        url = sheets.get_spreadsheet_url(channel_name, is_private)
+        url = sheets.get_spreadsheet_url(channel_name)
         url_line = f"\n:link: {url}" if url else ""
         say(
             f":memo: *`#{channel_name}` のログBot*{url_line}\n\n"
@@ -207,7 +195,7 @@ def handle_mention(event, client, say, logger):
             f"• `@Log Bot url` — スプレッドシートURL表示\n"
             f"• `@Log Bot backfill` — 過去90日分のログを収集\n"
             f"• `@Log Bot backfill 30` — 過去N日分を収集\n"
-            f"• `@Log Bot reset` — このチャンネルのシートをバックアップ＆リセット（プライベートのみ）\n"
+            f"• `@Log Bot reset` — このチャンネルのシートをバックアップ＆リセット\n"
             f"• `@Log Bot clear cache` — キャッシュクリア"
         )
 
@@ -215,14 +203,14 @@ def handle_mention(event, client, say, logger):
         say(":thinking_face: 不明なコマンドです。`@Log Bot help` でコマンド一覧を確認できます。")
 
 
-def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bool, days: int):
+def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
     """Collect past messages for a single channel."""
-    member_emails = get_member_emails(client, channel_id) if is_private else None
+    member_emails = get_member_emails(client, channel_id)
 
     # Attachments of messages already recorded would be downloaded and
     # re-uploaded on every run: the rows get deduped at write time, the Drive
     # files do not, so each run leaves another copy behind.
-    known_ts = sheets.recorded_ts(channel_name, is_private, member_emails)
+    known_ts = sheets.recorded_ts(channel_name, member_emails)
 
     oldest = datetime.now(timezone.utc) - timedelta(days=days)
     oldest_ts = str(oldest.timestamp())
@@ -262,7 +250,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
                 for f in files:
                     link = drive.download_from_slack_and_upload(
                         f, config.SLACK_BOT_TOKEN, channel_name,
-                        is_private, member_emails,
+                        member_emails,
                     )
                     if link:
                         attachment_links.append(link)
@@ -305,7 +293,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
                             for f in r_files:
                                 link = drive.download_from_slack_and_upload(
                                     f, config.SLACK_BOT_TOKEN, channel_name,
-                                    is_private, member_emails,
+                                    member_emails,
                                 )
                                 if link:
                                     r_links.append(link)
@@ -329,7 +317,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
             break
 
     new_count, skip_count = sheets.write_messages_grouped(
-        channel_name, collected, is_private, member_emails,
+        channel_name, collected, member_emails,
     )
     logger.info(f"Backfill #{channel_name}: {new_count} new, {skip_count} skipped")
 

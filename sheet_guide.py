@@ -13,6 +13,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 GUIDE_SHEET_TITLE = "📖 このシートについて"
+INDEX_SHEET_TITLE = "📇 チャンネル一覧"
+INDEX_HEADER = ["チャンネル", "ログのスプレッドシート"]
 
 # Names Google gives the default sheet, depending on account locale
 DEFAULT_SHEET_TITLES = {"シート1", "シート 1", "Sheet1", "Sheet 1"}
@@ -26,10 +28,11 @@ GUIDE_ROWS: list[tuple[str, str]] = [
     ("", "Slack の投稿・スレッド返信・添付ファイルを自動で記録しています。"),
     ("", "Slack 無料プランでは 90 日を過ぎたメッセージが読めなくなるため、消える前に保存しています。"),
     ("", ""),
-    (f"{SECTION_PREFIX} タブの構成", ""),
-    ("", "このシート以外の各タブが、1つのパブリックチャンネルに対応しています。"),
-    ("", "プライベートチャンネルは別のスプレッドシートに分かれており、"),
-    ("", "そのチャンネルのメンバーにのみ共有されます（このファイルには含まれません）。"),
+    (f"{SECTION_PREFIX} ファイルの構成", ""),
+    ("", "ログ本体はこのファイルではなく、チャンネルごとの別スプレッドシートにあります。"),
+    ("", f"「{INDEX_SHEET_TITLE}」タブに一覧とリンクがあります。"),
+    ("", "各スプレッドシートは、そのチャンネルのメンバーにだけ共有されています。"),
+    ("", "（Google スプレッドシートはタブ単位で権限を分けられないため、ファイルを分けています）"),
     ("", ""),
     (f"{SECTION_PREFIX} 列の意味", ""),
     ("日時", "投稿日時（Asia/Tokyo）"),
@@ -142,6 +145,79 @@ def _format_requests(sheet_id: int) -> list[dict]:
         }
     })
     return requests
+
+
+def write_channel_index(spreadsheet, entries: dict[str, str]):
+    """Refresh the tab listing every channel and where its log lives.
+
+    With one spreadsheet per channel, nothing otherwise tells you which files
+    exist or which channel each one covers.
+    """
+    if not entries:
+        return
+
+    rows = [INDEX_HEADER]
+    rows += [[f"#{name}", url] for name, url in sorted(entries.items())]
+
+    try:
+        worksheet = spreadsheet.worksheet(INDEX_SHEET_TITLE)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(
+            title=INDEX_SHEET_TITLE, rows=max(len(rows) + 20, 50), cols=2, index=1
+        )
+
+    worksheet.clear()
+    worksheet.update(rows, "A1", value_input_option="USER_ENTERED")
+
+    try:
+        spreadsheet.batch_update({"requests": [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": worksheet.id,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": worksheet.id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": COLOR_ACCENT,
+                            "textFormat": {
+                                "bold": True,
+                                "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+                            },
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": worksheet.id, "dimension": "COLUMNS",
+                        "startIndex": 0, "endIndex": 1,
+                    },
+                    "properties": {"pixelSize": 260},
+                    "fields": "pixelSize",
+                }
+            },
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": worksheet.id, "dimension": "COLUMNS",
+                        "startIndex": 1, "endIndex": 2,
+                    },
+                    "properties": {"pixelSize": 560},
+                    "fields": "pixelSize",
+                }
+            },
+        ]})
+    except Exception as e:
+        logger.warning(f"Failed to format the channel index: {e}")
 
 
 def _is_blank(worksheet) -> bool:

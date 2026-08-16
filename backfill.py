@@ -76,12 +76,13 @@ def backfill(channel_filter: str | None = None, days: int = 90):
         label = "private" if is_private else "public"
         logger.info(f"Backfilling #{ch_name} [{label}]...")
 
-        member_emails = get_member_emails(client, ch_id) if is_private else None
+        # Every channel's sheet is shared with that channel's members.
+        member_emails = get_member_emails(client, ch_id)
 
         # Attachments of messages already recorded would be downloaded and
         # re-uploaded on every run: the rows get deduped at write time, the
         # Drive files do not, so each run leaves another copy behind.
-        known_ts = sheets.recorded_ts(ch_name, is_private, member_emails)
+        known_ts = sheets.recorded_ts(ch_name, member_emails)
 
         # Phase 1: Collect all messages
         collected: list[dict] = []
@@ -119,7 +120,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                     for f in files:
                         link = drive.download_from_slack_and_upload(
                             f, config.SLACK_BOT_TOKEN, ch_name,
-                            is_private, member_emails,
+                            member_emails,
                         )
                         if link:
                             attachment_links.append(link)
@@ -161,7 +162,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                                 for f in r_files:
                                     link = drive.download_from_slack_and_upload(
                                         f, config.SLACK_BOT_TOKEN, ch_name,
-                                        is_private, member_emails,
+                                        member_emails,
                                     )
                                     if link:
                                         r_links.append(link)
@@ -186,7 +187,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
 
         # Phase 2: Write grouped by thread
         new_count, skip_count = sheets.write_messages_grouped(
-            ch_name, collected, is_private, member_emails,
+            ch_name, collected, member_emails,
         )
         logger.info(f"  #{ch_name}: {new_count} new, {skip_count} duplicates skipped")
         total_new += new_count

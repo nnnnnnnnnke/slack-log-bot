@@ -34,8 +34,9 @@ class DriveHandler:
             body={"type": "anyone", "role": "reader"},
         ).execute()
 
-    def _share_with_emails(self, file_id: str, emails: list[str]):
-        """Share a file/folder with specific email addresses."""
+    def _share_with_emails(self, file_id: str, emails: list[str]) -> int:
+        """Share a file/folder with specific email addresses. Returns the count."""
+        shared = 0
         for email in emails:
             try:
                 self.service.permissions().create(
@@ -43,8 +44,10 @@ class DriveHandler:
                     body={"type": "user", "role": "reader", "emailAddress": email},
                     sendNotificationEmail=False,
                 ).execute()
+                shared += 1
             except Exception as e:
                 logger.warning(f"Failed to share with {email}: {e}")
+        return shared
 
     def _find_folder(self, name: str, parent: str) -> str | None:
         query = (
@@ -79,7 +82,7 @@ class DriveHandler:
         return folder_id
 
     def _get_or_create_channel_folder(
-        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None
+        self, channel_name: str, member_emails: list[str] | None = None
     ) -> str:
         """Get or create the channel's folder under the attachments folder."""
         if channel_name in self._channel_folders:
@@ -115,13 +118,12 @@ class DriveHandler:
             ).execute()
             folder_id = folder["id"]
 
-            # Set permissions based on channel type
-            if is_private and member_emails:
-                self._share_with_emails(folder_id, member_emails)
-                logger.info(f"Created private Drive folder: {folder_name} (shared with {len(member_emails)} members)")
-            else:
-                self._share_with_anyone(folder_id)
-                logger.info(f"Created public Drive folder: {folder_name}")
+            # Access follows the channel, not whether Slack calls it private:
+            # the spreadsheet linking to these files is members-only too.
+            shared = self._share_with_emails(folder_id, member_emails or [])
+            logger.info(
+                f"Created Drive folder: {folder_name} (shared with {shared} members)"
+            )
 
         self._channel_folders[channel_name] = folder_id
         return folder_id
@@ -132,11 +134,10 @@ class DriveHandler:
         file_bytes: bytes,
         mime_type: str,
         channel_name: str,
-        is_private: bool = False,
         member_emails: list[str] | None = None,
     ) -> str:
         """Upload a file to the channel's folder and return its shareable link."""
-        folder_id = self._get_or_create_channel_folder(channel_name, is_private, member_emails)
+        folder_id = self._get_or_create_channel_folder(channel_name, member_emails)
 
         file_metadata = {
             "name": file_name,
@@ -151,11 +152,8 @@ class DriveHandler:
             .execute()
         )
 
-        # Set permissions based on channel type
-        if is_private and member_emails:
-            self._share_with_emails(uploaded["id"], member_emails)
-        else:
-            self._share_with_anyone(uploaded["id"])
+        # The parent folder's permissions already cover the file; sharing it
+        # again would double the Drive calls for no added access.
 
         logger.info(f"Uploaded to Drive: #{channel_name}/{file_name} -> {uploaded['webViewLink']}")
         return uploaded["webViewLink"]
@@ -165,7 +163,6 @@ class DriveHandler:
         file_info: dict,
         slack_token: str,
         channel_name: str,
-        is_private: bool = False,
         member_emails: list[str] | None = None,
     ) -> str | None:
         """Download a file from Slack and upload it to Google Drive.
@@ -201,7 +198,7 @@ class DriveHandler:
         try:
             return self.upload_file(
                 file_name, resp.content, mime_type,
-                channel_name, is_private, member_emails,
+                channel_name, member_emails,
             )
         except Exception as e:
             logger.error(f"Failed to upload to Drive: {e}")

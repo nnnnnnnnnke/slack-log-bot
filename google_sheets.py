@@ -15,7 +15,7 @@ from googleapiclient.discovery import build
 
 import config
 from google_auth import load_credentials
-from sheet_guide import ensure_guide_sheet
+from sheet_guide import ensure_guide_sheet, write_channel_index
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +98,16 @@ class SheetsHandler:
     def __init__(self):
         creds = load_credentials()
         self.gc = gspread.authorize(creds)
-        self.public_spreadsheet = self.gc.open_by_key(config.GOOGLE_SPREADSHEET_ID)
+        # Holds the guide and the channel index; message rows live in the
+        # per-channel spreadsheets beside it.
+        self.index_spreadsheet = self.gc.open_by_key(config.GOOGLE_SPREADSHEET_ID)
         self._drive = build("drive", "v3", credentials=creds)
 
         self.drive_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
         self._sheet_cache: dict[str, gspread.Worksheet] = {}
         self._existing_ts: dict[str, set[str]] = {}
-        self._private_spreadsheets: dict[str, gspread.Spreadsheet] = {}
+        self._channel_spreadsheets: dict[str, gspread.Spreadsheet] = {}
+        self._index_entries: dict[str, str] = {}
         self._formatted_sheets: set[str] = set()
         # Bolt dispatches events concurrently, and backfills run on their own
         # thread. Without this, two writers can interleave their read-then-append
@@ -114,7 +117,7 @@ class SheetsHandler:
         # Covers spreadsheets created before the guide existed. It is skipped
         # once present, and must never stop the bot from starting.
         try:
-            if ensure_guide_sheet(self.public_spreadsheet):
+            if ensure_guide_sheet(self.index_spreadsheet):
                 logger.info("Created guide sheet in the shared spreadsheet")
         except Exception as e:
             logger.warning(f"Could not create guide sheet: {e}")
@@ -336,42 +339,35 @@ class SheetsHandler:
         except Exception as e:
             logger.warning(f"Failed to format thread row: {e}")
 
-    # ── Public channel: tab in shared spreadsheet ──
+    # ── One spreadsheet per channel ──
 
-    def _get_or_create_public_sheet(self, channel_name: str) -> gspread.Worksheet:
-        if channel_name in self._sheet_cache:
-            return self._sheet_cache[channel_name]
+    def _channel_spreadsheet_name(self, channel_name: str) -> str:
+        return f"Slack Log - #{channel_name}"
 
-        is_new = False
-        try:
-            worksheet = self.public_spreadsheet.worksheet(channel_name)
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = _retry(
-                self.public_spreadsheet.add_worksheet,
-                title=channel_name, rows=1000, cols=len(HEADER_ROW),
-                idempotent=False,
-            )
-            _retry(worksheet.append_row, HEADER_ROW, idempotent=False)
-            is_new = True
-            logger.info(f"Created public sheet tab: {channel_name}")
+    def share_with_members(self, spreadsheet, member_emails: list[str]) -> int:
+        """Grant read access to a channel's members. Returns how many were added."""
+        added = 0
+        for email in member_emails:
+            try:
+                spreadsheet.share(email, perm_type="user", role="reader", notify=False)
+                added += 1
+            except Exception as e:
+                logger.warning(f"Failed to share {spreadsheet.title} with {email}: {e}")
+        return added
 
-        if is_new or channel_name not in self._formatted_sheets:
-            self._format_sheet(worksheet, self.public_spreadsheet)
-            self._formatted_sheets.add(channel_name)
-
-        self._sheet_cache[channel_name] = worksheet
-        return worksheet
-
-    # ── Private channel: separate spreadsheet per channel ──
-
-    def _get_or_create_private_spreadsheet(
-        self, channel_name: str, member_emails: list[str]
+    def _get_or_create_channel_spreadsheet(
+        self, channel_name: str, member_emails: list[str] | None = None
     ) -> gspread.Spreadsheet:
-        if channel_name in self._private_spreadsheets:
-            return self._private_spreadsheets[channel_name]
+        """The channel's own spreadsheet, shared with that channel's members.
 
-        ss_name = f"Slack Log - #{channel_name}"
+        Every channel gets its own file rather than a tab in a shared one:
+        Sheets grants access per file, so a tab cannot be handed to one group
+        without handing over every other channel in the same spreadsheet.
+        """
+        if channel_name in self._channel_spreadsheets:
+            return self._channel_spreadsheets[channel_name]
 
+        ss_name = self._channel_spreadsheet_name(channel_name)
         query = (
             f"name = '{ss_name}' and "
             f"'{self.drive_folder_id}' in parents and "
@@ -387,30 +383,61 @@ class SheetsHandler:
             ss = self.gc.open_by_key(files[0]["id"])
         else:
             ss = self.gc.create(ss_name, folder_id=self.drive_folder_id)
+            shared = self.share_with_members(ss, member_emails or [])
+            logger.info(f"Created spreadsheet: {ss_name} (shared with {shared} members)")
+            if not shared:
+                logger.warning(
+                    f"{ss_name} is not shared with anyone: no member email was "
+                    f"resolvable. Check the users:read.email scope."
+                )
+            self._register_in_index(channel_name, ss)
 
-            for email in member_emails:
-                try:
-                    ss.share(email, perm_type="user", role="reader", notify=False)
-                except Exception as e:
-                    logger.warning(f"Failed to share spreadsheet with {email}: {e}")
-            logger.info(
-                f"Created private spreadsheet: {ss_name} "
-                f"(shared with {len(member_emails)} members)"
-            )
-
-        self._private_spreadsheets[channel_name] = ss
+        self._channel_spreadsheets[channel_name] = ss
         return ss
 
-    def _get_or_create_private_sheet(
-        self, channel_name: str, member_emails: list[str]
+    def _register_in_index(self, channel_name: str, spreadsheet: gspread.Spreadsheet):
+        """Record the channel's spreadsheet URL in the index."""
+        try:
+            self._index_entries[channel_name] = spreadsheet.url
+            write_channel_index(self.index_spreadsheet, self._collect_index_entries())
+        except Exception as e:
+            logger.warning(f"Could not update the channel index: {e}")
+
+    def _collect_index_entries(self) -> dict[str, str]:
+        """Every channel spreadsheet in the Drive folder, by channel name."""
+        entries = dict(self._index_entries)
+        try:
+            query = (
+                f"'{self.drive_folder_id}' in parents and "
+                f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
+                f"trashed = false"
+            )
+            found = self._drive.files().list(
+                q=query, fields="files(id, name)", pageSize=1000
+            ).execute().get("files", [])
+            for meta in found:
+                if not meta["name"].startswith("Slack Log - #"):
+                    continue
+                name = meta["name"][len("Slack Log - #"):]
+                entries.setdefault(
+                    name, f"https://docs.google.com/spreadsheets/d/{meta['id']}/edit"
+                )
+        except Exception as e:
+            logger.warning(f"Could not list channel spreadsheets: {e}")
+        return entries
+
+    def _get_or_create_channel_sheet(
+        self, channel_name: str, member_emails: list[str] | None = None
     ) -> gspread.Worksheet:
         if channel_name in self._sheet_cache:
             return self._sheet_cache[channel_name]
 
-        ss = self._get_or_create_private_spreadsheet(channel_name, member_emails)
+        ss = self._get_or_create_channel_spreadsheet(channel_name, member_emails)
 
-        worksheet = ss.sheet1
-        if worksheet.title != channel_name:
+        try:
+            worksheet = ss.worksheet(channel_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = ss.sheet1
             _retry(worksheet.update_title, channel_name, idempotent=False)
 
         is_new = False
@@ -428,17 +455,13 @@ class SheetsHandler:
     # ── Shared logic ──
 
     def _get_worksheet(
-        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None
+        self, channel_name: str, member_emails: list[str] | None = None
     ) -> gspread.Worksheet:
-        if is_private:
-            return self._get_or_create_private_sheet(channel_name, member_emails or [])
-        return self._get_or_create_public_sheet(channel_name)
+        return self._get_or_create_channel_sheet(channel_name, member_emails)
 
-    def _get_spreadsheet(self, channel_name: str, is_private: bool = False) -> gspread.Spreadsheet:
-        """Get the Spreadsheet object for formatting API calls."""
-        if is_private and channel_name in self._private_spreadsheets:
-            return self._private_spreadsheets[channel_name]
-        return self.public_spreadsheet
+    def _get_spreadsheet(self, channel_name: str) -> gspread.Spreadsheet:
+        """The Spreadsheet object a worksheet belongs to, for formatting calls."""
+        return self._get_or_create_channel_spreadsheet(channel_name)
 
     def _load_existing_ts(self, channel_name: str, worksheet: gspread.Worksheet) -> set[str]:
         if channel_name in self._existing_ts:
@@ -497,64 +520,47 @@ class SheetsHandler:
         if channel_name:
             self._sheet_cache.pop(channel_name, None)
             self._existing_ts.pop(channel_name, None)
-            self._private_spreadsheets.pop(channel_name, None)
+            self._channel_spreadsheets.pop(channel_name, None)
             self._formatted_sheets.discard(channel_name)
         else:
             self._sheet_cache.clear()
             self._existing_ts.clear()
-            self._private_spreadsheets.clear()
+            self._channel_spreadsheets.clear()
             self._formatted_sheets.clear()
 
-    def backup_and_reset_channel(
-        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None,
-    ) -> str | None:
+    def backup_and_reset_channel(self, channel_name: str, member_emails: list[str] | None = None) -> str | None:
         """Backup the channel tab, delete it, and clear cache. Returns backup tab name."""
         with self._lock:
             return self._backup_and_reset_channel_locked(
-                channel_name, is_private, member_emails,
+                channel_name, member_emails,
             )
 
-    def _backup_and_reset_channel_locked(
-        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None,
-    ) -> str | None:
+    def _backup_and_reset_channel_locked(self, channel_name: str, member_emails: list[str] | None = None) -> str | None:
         now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
         backup_name = f"{channel_name}_bak_{now_str}"
 
-        if is_private:
-            if channel_name not in self._private_spreadsheets:
-                # Try to find it
-                try:
-                    self._get_or_create_private_sheet(channel_name, member_emails or [])
-                except Exception:
-                    return None
-            if channel_name not in self._private_spreadsheets:
-                return None
-            ss = self._private_spreadsheets[channel_name]
-            try:
-                ws = ss.worksheet(channel_name)
-                ss.duplicate_sheet(ws.id, new_sheet_name=backup_name)
-                ss.del_worksheet(ws)
-                logger.info(f"Backup & reset private #{channel_name} -> {backup_name}")
-            except Exception as e:
-                logger.error(f"Failed to backup/reset #{channel_name}: {e}")
-                return None
-        else:
-            try:
-                ws = self.public_spreadsheet.worksheet(channel_name)
-                self.public_spreadsheet.duplicate_sheet(ws.id, new_sheet_name=backup_name)
-                self.public_spreadsheet.del_worksheet(ws)
-                logger.info(f"Backup & reset public #{channel_name} -> {backup_name}")
-            except gspread.exceptions.WorksheetNotFound:
-                return None
-            except Exception as e:
-                logger.error(f"Failed to backup/reset #{channel_name}: {e}")
-                return None
+        try:
+            ss = self._get_or_create_channel_spreadsheet(channel_name, member_emails)
+        except Exception as e:
+            logger.error(f"Failed to open #{channel_name}: {e}")
+            return None
+
+        try:
+            ws = ss.worksheet(channel_name)
+            ss.duplicate_sheet(ws.id, new_sheet_name=backup_name)
+            ss.del_worksheet(ws)
+            logger.info(f"Backup & reset #{channel_name} -> {backup_name}")
+        except gspread.exceptions.WorksheetNotFound:
+            return None
+        except Exception as e:
+            logger.error(f"Failed to backup/reset #{channel_name}: {e}")
+            return None
 
         self.clear_cache(channel_name)
         return backup_name
 
     def recorded_ts(
-        self, channel_name: str, is_private: bool = False,
+        self, channel_name: str,
         member_emails: list[str] | None = None,
     ) -> set[str]:
         """Message TSs already in the sheet for this channel.
@@ -564,16 +570,32 @@ class SheetsHandler:
         time, so those uploads are discarded, but Drive keeps every copy.
         """
         with self._lock:
-            worksheet = self._get_worksheet(channel_name, is_private, member_emails)
+            worksheet = self._get_worksheet(channel_name, member_emails)
             return set(self._load_existing_ts(channel_name, worksheet))
 
-    def get_spreadsheet_url(self, channel_name: str, is_private: bool = False) -> str | None:
-        """Return the spreadsheet URL for a channel."""
-        if is_private and channel_name in self._private_spreadsheets:
-            return self._private_spreadsheets[channel_name].url
-        if not is_private:
-            return self.public_spreadsheet.url
-        return None
+    def get_spreadsheet_url(self, channel_name: str) -> str | None:
+        """Return the spreadsheet URL for a channel, or None if it has none yet."""
+        if channel_name in self._channel_spreadsheets:
+            return self._channel_spreadsheets[channel_name].url
+        query = (
+            f"name = '{self._channel_spreadsheet_name(channel_name)}' and "
+            f"'{self.drive_folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        )
+        try:
+            files = self._drive.files().list(
+                q=query, fields="files(id)", pageSize=1
+            ).execute().get("files", [])
+        except Exception as e:
+            logger.warning(f"Could not look up the sheet for #{channel_name}: {e}")
+            return None
+        if not files:
+            return None
+        return f"https://docs.google.com/spreadsheets/d/{files[0]['id']}/edit"
+
+    def index_url(self) -> str:
+        """URL of the spreadsheet holding the guide and the channel index."""
+        return self.index_spreadsheet.url
 
     # ── Realtime insert (main.py) ──
 
@@ -587,12 +609,11 @@ class SheetsHandler:
         thread_ts: str | None,
         attachment_links: list[str],
         permalink: str,
-        is_private: bool = False,
         member_emails: list[str] | None = None,
     ) -> bool:
         with self._lock:
-            worksheet = self._get_worksheet(channel_name, is_private, member_emails)
-            spreadsheet = self._get_spreadsheet(channel_name, is_private)
+            worksheet = self._get_worksheet(channel_name, member_emails)
+            spreadsheet = self._get_spreadsheet(channel_name)
 
             existing = self._load_existing_ts(channel_name, worksheet)
             if ts in existing:
@@ -641,14 +662,14 @@ class SheetsHandler:
 
     def update_attachment_links(
         self, channel_name: str, ts: str, attachment_links: list[str],
-        is_private: bool = False, member_emails: list[str] | None = None,
+        member_emails: list[str] | None = None,
     ):
         """Update the attachment column for a message identified by TS."""
         if not attachment_links:
             return
         try:
             with self._lock:
-                worksheet = self._get_worksheet(channel_name, is_private, member_emails)
+                worksheet = self._get_worksheet(channel_name, member_emails)
                 ts_values = _retry(worksheet.col_values, TS_COLUMN)
                 for i, val in enumerate(ts_values):
                     if val == ts:
@@ -689,23 +710,21 @@ class SheetsHandler:
         self,
         channel_name: str,
         messages: list[dict],
-        is_private: bool = False,
         member_emails: list[str] | None = None,
     ) -> tuple[int, int]:
         with self._lock:
             return self._write_messages_grouped_locked(
-                channel_name, messages, is_private, member_emails,
+                channel_name, messages, member_emails,
             )
 
     def _write_messages_grouped_locked(
         self,
         channel_name: str,
         messages: list[dict],
-        is_private: bool = False,
         member_emails: list[str] | None = None,
     ) -> tuple[int, int]:
-        worksheet = self._get_worksheet(channel_name, is_private, member_emails)
-        spreadsheet = self._get_spreadsheet(channel_name, is_private)
+        worksheet = self._get_worksheet(channel_name, member_emails)
+        spreadsheet = self._get_spreadsheet(channel_name)
         existing = self._load_existing_ts(channel_name, worksheet)
 
         new_messages = [m for m in messages if m["ts"] not in existing]
