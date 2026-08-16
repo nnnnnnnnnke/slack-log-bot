@@ -158,18 +158,23 @@ CHANNEL_ID_PROPERTY = "slackChannelId"
 
 JST = timezone(timedelta(hours=9))
 
-# Thread reply marker, and the indent that keeps the rest of a multi-line
-# reply aligned under it instead of starting back at the left edge.
 THREAD_PREFIX = "└ "
-THREAD_INDENT = " " * len(THREAD_PREFIX)
 
 
 def mark_thread_reply(text: str) -> str:
-    """Prefix a reply with the thread marker, indenting its later lines."""
-    lines = text.split("\n")
-    return "\n".join(
-        [THREAD_PREFIX + lines[0]] + [THREAD_INDENT + line for line in lines[1:]]
-    )
+    """Mark a reply with the thread glyph.
+
+    A multi-line reply puts the marker on a line of its own so every line of
+    the message starts at the same place. Indenting the later lines instead
+    only lines up in a monospaced font: the sheet's font is proportional, and
+    "└ " there is far wider than the two spaces that would stand in for it.
+
+    A single-line reply keeps the marker inline, where there is nothing to
+    line up with and a second line would only cost height.
+    """
+    if "\n" not in text:
+        return THREAD_PREFIX + text
+    return THREAD_PREFIX.rstrip() + "\n" + text
 
 
 class SheetsHandler:
@@ -704,6 +709,20 @@ class SheetsHandler:
         except (ValueError, TypeError):
             return ts
 
+    @staticmethod
+    def _display_text(msg: dict) -> str:
+        """The message as it appears in the cell, marker included.
+
+        Row heights are worked out from this rather than the raw text: the
+        marker adds a line to a multi-line reply, and a height measured
+        without it comes up one line short.
+        """
+        text = msg.get("text", "")
+        thread_ts = msg.get("thread_ts")
+        if thread_ts and thread_ts != msg.get("ts"):
+            return mark_thread_reply(text)
+        return text
+
     def _build_row(
         self,
         username: str,
@@ -904,7 +923,8 @@ class SheetsHandler:
                 inserted_row = _appended_row_number(resp)
             if inserted_row:
                 requests = self._row_height_requests(
-                    worksheet.id, inserted_row, [text]
+                    worksheet.id, inserted_row,
+                    [mark_thread_reply(text) if is_thread_reply else text],
                 )
                 if attachments:
                     requests.append(self._attachment_cell_request(
@@ -1051,7 +1071,7 @@ class SheetsHandler:
         if start_row:
             self.apply_row_heights(
                 worksheet, spreadsheet, start_row,
-                [m.get("text", "") for m in ordered_msgs],
+                [self._display_text(m) for m in ordered_msgs],
             )
             attachment_requests = [
                 self._attachment_cell_request(
