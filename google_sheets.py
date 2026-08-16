@@ -4,7 +4,7 @@ Public channels  → shared spreadsheet (anyone with link), tabs per channel
 Private channels → separate spreadsheet per channel, shared with members only
 """
 
-import hashlib
+import colorsys
 import logging
 import math
 import re
@@ -162,30 +162,44 @@ COLOR_TS_FG = {"red": 0.55, "green": 0.55, "blue": 0.55}          # #8C8C8C gray
 COLOR_LINK = {"red": 0.066, "green": 0.333, "blue": 0.8}          # #1155cc link blue
 COLOR_AUTHOR_RULE = {"red": 0.75, "green": 0.75, "blue": 0.75}    # #bfbfbf
 
-# Tints for the username cell, one per author. Greens are left out so a
+# Tints for the name cell, one per author. Hues skip the green band so a
 # coloured name is never mistaken for the green a thread reply sits on, and
 # every tint is pale enough to read black text against.
-USER_COLORS = [
-    {"red": 0.99, "green": 0.90, "blue": 0.91},   # red
-    {"red": 1.00, "green": 0.95, "blue": 0.88},   # orange
-    {"red": 1.00, "green": 0.99, "blue": 0.85},   # yellow
-    {"red": 0.93, "green": 0.91, "blue": 0.96},   # purple
-    {"red": 0.89, "green": 0.95, "blue": 0.99},   # blue
-    {"red": 0.99, "green": 0.89, "blue": 0.96},   # pink
-    {"red": 0.94, "green": 0.92, "blue": 0.90},   # brown
-    {"red": 0.92, "green": 0.94, "blue": 0.95},   # blue grey
-]
+#
+# Colours are handed out in order of first appearance and remembered, not
+# hashed: hashing into N slots still collides by the birthday problem — with
+# 20 people and 100 colours, two of them share a colour more often than not.
+USER_COLOR_HUE_RANGES = [(0, 89), (161, 359)]
+USER_COLOR_HUES = 25
+USER_COLOR_TIERS = [(0.35, 0.92), (0.60, 0.90), (0.35, 0.85), (0.60, 0.83)]
 
 
-def user_color(username: str) -> dict:
-    """A tint for this author, stable across runs and machines.
+def _build_user_palette() -> list[dict]:
+    span = sum(high - low for low, high in USER_COLOR_HUE_RANGES)
+    hues = []
+    for i in range(USER_COLOR_HUES):
+        position = span * i / USER_COLOR_HUES
+        for low, high in USER_COLOR_HUE_RANGES:
+            if position <= high - low:
+                hues.append(low + position)
+                break
+            position -= high - low
 
-    Hashed rather than assigned in order of appearance so the same person
-    keeps the same colour in every channel, and a new member needs no setup.
-    Python's hash() is salted per process, hence md5.
-    """
-    digest = hashlib.md5(username.encode("utf-8")).digest()
-    return USER_COLORS[digest[0] % len(USER_COLORS)]
+    palette = []
+    for saturation, lightness in USER_COLOR_TIERS:
+        for hue in hues:
+            red, green, blue = colorsys.hls_to_rgb(hue / 360, lightness, saturation)
+            palette.append({"red": red, "green": green, "blue": blue})
+    return palette
+
+
+USER_COLORS = _build_user_palette()
+
+# Tab in the index spreadsheet holding which colour each name was given, so
+# the same person keeps theirs as people come and go.
+COLOR_SHEET_TITLE = "🎨 表示名の色"
+COLOR_SHEET_HEADER = ["表示名", "色番号"]
+
 
 # Drive appProperty tying a spreadsheet to its Slack channel, so a rename
 # does not orphan the history under the old name.
@@ -229,6 +243,7 @@ class SheetsHandler:
         # Last author written per channel, so a run of messages from one
         # person is not ruled off in the middle when they arrive one by one.
         self._last_author: dict[str, str] = {}
+        self._color_assignments: dict[str, int] | None = None
         self._formatted_sheets: set[str] = set()
         # Bolt dispatches events concurrently, and backfills run on their own
         # thread. Without this, two writers can interleave their read-then-append
@@ -506,6 +521,70 @@ class SheetsHandler:
         except Exception as e:
             logger.warning(f"Failed to refresh reply counts: {e}")
 
+    def _load_color_assignments(self) -> dict[str, int]:
+        """Which colour each name was given, kept in the index spreadsheet.
+
+        Stored rather than derived so a name keeps its colour for good, and
+        shared through the spreadsheet so a second machine running the same
+        workspace agrees.
+        """
+        if self._color_assignments is not None:
+            return self._color_assignments
+
+        assignments: dict[str, int] = {}
+        try:
+            worksheet = self.index_spreadsheet.worksheet(COLOR_SHEET_TITLE)
+            for row in _retry(worksheet.get_all_values)[1:]:
+                if len(row) >= 2 and row[0] and row[1].isdigit():
+                    assignments[row[0]] = int(row[1])
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+        except Exception as e:
+            logger.warning(f"Could not read the colour assignments: {e}")
+
+        self._color_assignments = assignments
+        return assignments
+
+    def _save_color_assignments(self, assignments: dict[str, int]):
+        rows = [COLOR_SHEET_HEADER] + [
+            [name, str(index)]
+            for name, index in sorted(assignments.items(), key=lambda kv: kv[1])
+        ]
+        try:
+            try:
+                worksheet = self.index_spreadsheet.worksheet(COLOR_SHEET_TITLE)
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = self.index_spreadsheet.add_worksheet(
+                    title=COLOR_SHEET_TITLE, rows=max(len(rows) + 20, 50), cols=2
+                )
+            _retry(worksheet.clear, idempotent=False)
+            _retry(
+                worksheet.update, rows, "A1",
+                value_input_option="RAW", idempotent=False,
+            )
+        except Exception as e:
+            logger.warning(f"Could not save the colour assignments: {e}")
+
+    def color_for(self, display_name: str) -> dict:
+        """The colour for this author, assigning one the first time it is seen."""
+        with self._lock:
+            assignments = self._load_color_assignments()
+            if display_name not in assignments:
+                taken = set(assignments.values())
+                nxt = next(
+                    (i for i in range(len(USER_COLORS)) if i not in taken), None
+                )
+                if nxt is None:
+                    # More authors than colours: wrap round rather than fail,
+                    # which is where a duplicate can finally appear.
+                    nxt = len(assignments) % len(USER_COLORS)
+                    logger.warning(
+                        f"More than {len(USER_COLORS)} authors; colours now repeat"
+                    )
+                assignments[display_name] = nxt
+                self._save_color_assignments(assignments)
+            return USER_COLORS[assignments[display_name] % len(USER_COLORS)]
+
     def author_style_requests(
         self, sheet_id: int, start_row: int, authors: list[str],
         previous_author: str | None = None,
@@ -533,7 +612,7 @@ class SheetsHandler:
                             },
                             "cell": {
                                 "userEnteredFormat": {
-                                    "backgroundColor": user_color(run_author)
+                                    "backgroundColor": self.color_for(run_author)
                                 }
                             },
                             "fields": "userEnteredFormat.backgroundColor",
