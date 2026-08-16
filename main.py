@@ -91,14 +91,14 @@ def handle_message(event, client, logger):
     # The channel's sheet is shared with exactly this channel's members.
     member_emails = get_member_emails(client, channel_id)
 
-    _, username, _ = get_user_info(client, user_id)
+    display_name, _, _ = get_user_info(client, user_id)
     text = resolve_mentions(client, text)
 
     # Log message immediately (without waiting for file uploads)
     try:
         sheets.insert_message(
             channel_name=channel_name,
-            username=username,
+            display_name=display_name,
             text=text,
             ts=ts,
             thread_ts=thread_ts,

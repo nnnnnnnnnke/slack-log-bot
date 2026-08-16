@@ -43,7 +43,9 @@ def _build_entry(
         return None
 
     ts = message.get("ts", "")
-    _, username, _ = get_user_info(client, user_id)
+    # The display name is what people see in Slack; the handle is a second
+    # spelling of the same person and reads as noise in a log of who said what.
+    display_name, _, _ = get_user_info(client, user_id)
 
     # Attachments of a message already recorded would be uploaded to Drive
     # again: the row is deduped at write time, the file is not.
@@ -54,7 +56,7 @@ def _build_entry(
         )
 
     return {
-        "username": username,
+        "display_name": display_name,
         "text": resolve_mentions(client, message.get("text", "")),
         "ts": ts,
         "thread_ts": thread_ts,

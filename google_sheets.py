@@ -68,7 +68,7 @@ def _appended_row_number(response) -> int | None:
 
 HEADER_ROW = [
     "日時",
-    "ユーザー名",
+    "表示名",
     "メッセージ",
     "添付ファイル",
     "メッセージTS",
@@ -91,6 +91,13 @@ LEGACY_LAYOUTS = [
         ["日時", "ユーザー名", "メッセージ", "添付ファイル",
          "パーマリンク", "メッセージTS", "スレッドTS"],
         [0, 1, 2, 3, 5, 6],
+    ),
+    # Same columns, but the name column held the @handle rather than the
+    # display name people actually see in Slack.
+    (
+        ["日時", "ユーザー名", "メッセージ", "添付ファイル",
+         "メッセージTS", "スレッドTS"],
+        [0, 1, 2, 3, 4, 5],
     ),
 ]
 
@@ -925,7 +932,7 @@ class SheetsHandler:
 
     def _build_row(
         self,
-        username: str,
+        display_name: str,
         text: str,
         ts: str,
         thread_ts: str | None,
@@ -933,7 +940,7 @@ class SheetsHandler:
     ) -> list[str]:
         return [
             self._ts_to_datetime(ts),
-            f"@{username}",
+            display_name,
             text,
             "\n".join(name for name, _ in attachments),
             ts,
@@ -1070,7 +1077,7 @@ class SheetsHandler:
     def insert_message(
         self,
         channel_name: str,
-        username: str,
+        display_name: str,
         text: str,
         ts: str,
         thread_ts: str | None,
@@ -1087,7 +1094,7 @@ class SheetsHandler:
                 return False
 
             row = self._build_row(
-                username, text, ts, thread_ts, attachments,
+                display_name, text, ts, thread_ts, attachments,
             )
 
             is_thread_reply = thread_ts and thread_ts != ts
@@ -1124,10 +1131,10 @@ class SheetsHandler:
                     worksheet.id, inserted_row, [text]
                 )
                 requests.extend(self.author_style_requests(
-                    worksheet.id, inserted_row, [f"@{username}"],
+                    worksheet.id, inserted_row, [display_name],
                     self._last_author.get(channel_name),
                 ))
-                self._last_author[channel_name] = f"@{username}"
+                self._last_author[channel_name] = display_name
                 if attachments:
                     requests.append(self._attachment_cell_request(
                         worksheet.id, inserted_row, attachments
@@ -1151,7 +1158,7 @@ class SheetsHandler:
                 self.sync_reply_counts(worksheet, spreadsheet)
 
         logger.info(
-            f"Logged: #{channel_name} @{username} ({self._ts_to_datetime(ts)})"
+            f"Logged: #{channel_name} {display_name} ({self._ts_to_datetime(ts)})"
         )
         return True
 
@@ -1259,7 +1266,7 @@ class SheetsHandler:
         for _group_key, group_msgs in sorted_groups:
             for msg in group_msgs:
                 row = self._build_row(
-                    username=msg["username"],
+                    display_name=msg["display_name"],
                     text=msg["text"],
                     ts=msg["ts"],
                     thread_ts=msg.get("thread_ts"),
@@ -1298,11 +1305,11 @@ class SheetsHandler:
             self.apply_thread_groups(worksheet, spreadsheet, start_row, ordered_msgs)
             self.apply_author_styles(
                 worksheet, spreadsheet, start_row,
-                [f"@{m['username']}" for m in ordered_msgs],
+                [m["display_name"] for m in ordered_msgs],
                 self._last_author.get(channel_name),
             )
             if ordered_msgs:
-                self._last_author[channel_name] = f"@{ordered_msgs[-1]['username']}"
+                self._last_author[channel_name] = ordered_msgs[-1]["display_name"]
             self.sync_reply_counts(worksheet, spreadsheet)
         else:
             logger.warning(
