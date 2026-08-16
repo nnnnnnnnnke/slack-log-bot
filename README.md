@@ -43,8 +43,9 @@ slack_log_bot/
 ├── google_sheets.py      # スプレッドシート操作・書式設定
 ├── google_drive.py       # Drive添付ファイルアップロード
 ├── slack_utils.py        # Slackユーザー・チャンネル情報の解決
+├── google_auth.py        # Google OAuth2認証（Sheets/Drive共通）
 ├── config.py             # 環境変数の読み込み
-├── setup_drive_auth.py   # Google Drive OAuth2認証セットアップ
+├── setup.py              # セットアップウィザード（対話式）
 ├── slack-app-manifest.yml # Slack Appマニフェスト（貼るだけでApp設定完了）
 ├── requirements.txt      # Python依存パッケージ
 ├── .env.example          # 環境変数テンプレート
@@ -207,124 +208,91 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 
 ### Step 2: Google Cloudの設定
 
-#### 2-1. プロジェクト作成 & API有効化
+必要なのは **OAuth クライアントID を1つ作るだけ**です。
+スプレッドシートと Drive フォルダは Step 4 の `setup.py` が自動で作成するため、
+手で作ってIDをコピーする作業はありません。
 
-1. [Google Cloud Console](https://console.cloud.google.com/) にアクセス
-2. プロジェクトを新規作成（または既存プロジェクトを使用）
-3. 以下の2つのAPIを有効化:
+1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを新規作成（既存でも可）
+2. 以下の2つのAPIを有効化:
    - **Google Sheets API** — [有効化リンク](https://console.cloud.google.com/apis/library/sheets.googleapis.com)
    - **Google Drive API** — [有効化リンク](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+3. **「APIとサービス」→「認証情報」→「認証情報を作成」→「OAuth クライアントID」**
+   - アプリケーションの種類: **デスクトップアプリ**
+   - 作成後、JSONをダウンロードして `client_secret.json` としてプロジェクトに配置
 
-#### 2-2. サービスアカウント作成
-
-1. **「IAM と管理」→「サービスアカウント」** に移動
-2. **「サービスアカウントを作成」** をクリック
-3. 名前を入力（例: `slack-log-bot`）して作成
-4. 作成したアカウントをクリック → **「鍵」タブ**
-5. **「鍵を追加」→「新しい鍵を作成」→「JSON」** を選択
-6. ダウンロードされたJSONファイルを `service_account.json` としてプロジェクトに配置
-
-> サービスアカウントのメールアドレス（例: `slack-log-bot@project-id.iam.gserviceaccount.com`）は
-> JSONファイル内の `client_email` フィールドに記載されています。次のステップで使います。
-
-#### 2-3. OAuth2 クライアントID作成（Google Drive用）
-
-サービスアカウントにはDriveストレージ容量がないため、ファイルアップロードとプライベートチャンネルのスプレッドシート作成にはOAuth2認証が必要です。
-
-1. **「APIとサービス」→「認証情報」** に移動
-2. **「認証情報を作成」→「OAuth クライアントID」** をクリック
-3. アプリケーションの種類: **デスクトップアプリ**
-4. 名前（例: `slack-log-bot-drive`）を入力して作成
-5. JSONファイルをダウンロードし、`client_secret.json` としてプロジェクトに配置
-
-> **OAuth同意画面の設定**: 初めての場合は先に同意画面を設定する必要があります。
+> **OAuth同意画面**: 初回は先に同意画面の設定が必要です。
 > 「外部」を選び、テストユーザーに自分のGmailアドレスを追加してください。
 
-#### 2-4. Google スプレッドシートの作成
-
-1. [Google Sheets](https://sheets.google.com/) で新しいスプレッドシートを作成
-2. 名前を付ける（例: `Slack ログ`）
-3. URLからスプレッドシートIDを取得:
-   ```
-   https://docs.google.com/spreadsheets/d/【ここがスプレッドシートID】/edit
-   ```
-4. **「共有」** ボタンをクリック → サービスアカウントのメールアドレスを **「編集者」** として追加
-
-#### 2-5. Google Drive フォルダの作成
-
-1. [Google Drive](https://drive.google.com/) で添付ファイル保存用のフォルダを作成
-2. 名前を付ける（例: `Slack添付ファイル`）
-3. URLからフォルダIDを取得:
-   ```
-   https://drive.google.com/drive/folders/【ここがフォルダID】
-   ```
-4. フォルダを右クリック → **「共有」** → サービスアカウントのメールアドレスを **「編集者」** として追加
+> [!IMPORTANT]
+> 同意画面を **「テスト中」のままにすると、Googleの仕様でリフレッシュトークンが7日で失効します。**
+> 継続運用する場合は、動作確認後に同意画面を **「本番環境」** に切り替えてください。
+> 未審査のままでも動作しますが、認証時に「このアプリは確認されていません」の警告が表示されます。
 
 ---
 
 ### Step 3: botのインストール
 
 ```bash
-# リポジトリをクローン
 git clone https://github.com/nnnnnnnnnke/slack-log-bot.git
 cd slack-log-bot
 
-# Python仮想環境を作成 & 有効化
 python3 -m venv .venv
 source .venv/bin/activate
-
-# 依存パッケージをインストール
 pip install -r requirements.txt
 ```
 
 ---
 
-### Step 4: 環境変数の設定
+### Step 4: セットアップウィザード
+
+```bash
+python setup.py
+```
+
+対話形式で以下をすべて実行します:
+
+| | 内容 |
+|---|---|
+| 1/4 | Slackトークンの入力と接続確認 — **必要なスコープが揃っているか事前に検証**し、足りなければ名前を挙げて中断 |
+| 2/4 | Googleの認証（ブラウザが開きます）→ `drive_token.json` を生成 |
+| 3/4 | **スプレッドシートとDriveフォルダを自動作成**し、IDを `.env` に書き込み |
+| 4/4 | 実際に開けるかを確認する書き込みテスト |
+
+何度でも再実行できます。設定済みかつ正常な項目はスキップされるので、
+途中で失敗しても最初からやり直す必要はありません。
+
+```bash
+python setup.py --reauth   # Googleの認証だけやり直す
+```
+
+<details>
+<summary><b>手動で .env を設定する場合</b></summary>
+
+既存のスプレッドシート・フォルダを使いたいときは、`.env` に直接IDを書けば
+`setup.py` はそれを尊重して自動作成をスキップします。
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` を編集して以下を設定:
-
 ```ini
-# Slack（Step 1で取得したトークン）
 SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx
 SLACK_APP_TOKEN=xapp-x-xxxxxxxxxx-xxxxxxxxxxxxx-xxxxxxxx
 
-# Google（Step 2で作成・取得した情報）
-GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json
+# URLの /d/ と /edit の間 / folders/ の後ろ
 GOOGLE_SPREADSHEET_ID=your_spreadsheet_id_here
 GOOGLE_DRIVE_FOLDER_ID=your_folder_id_here
 
-# タイムゾーン
 TIMEZONE=Asia/Tokyo
 ```
 
-`service_account.json` と `client_secret.json` もプロジェクトディレクトリに配置:
+その後 `python setup.py` を実行すれば、認証と疎通確認だけが行われます。
 
-```bash
-cp /path/to/downloaded/service_account.json ./service_account.json
-cp /path/to/downloaded/client_secret.json ./client_secret.json
-```
+</details>
 
 ---
 
-### Step 5: Google Drive OAuth2認証
-
-```bash
-source .venv/bin/activate
-python setup_drive_auth.py
-```
-
-ブラウザが開くので、Googleアカウントでログインし、Driveへのアクセスを許可してください。
-成功すると `drive_token.json` が生成されます。
-
-> この認証は初回のみ必要です。トークンは自動的にリフレッシュされます。
-
----
-
-### Step 6: 動作確認
+### Step 5: 動作確認
 
 ```bash
 # まず過去メッセージの取り込みテスト（特定チャンネル・過去7日）
@@ -455,20 +423,32 @@ python backfill.py --days 30
 
 ## トラブルシューティング
 
-### 添付ファイルがアップロードされない / `storageQuotaExceeded`
+### 1週間ほど動いた後に突然 Google 認証が失敗する
 
-サービスアカウントにはDriveストレージ容量がありません。
-`setup_drive_auth.py` を実行してOAuth2認証を完了してください（Step 5参照）。
+OAuth同意画面が **「テスト中」** のままだと、Googleの仕様でリフレッシュトークンが
+7日で失効します。同意画面を **「本番環境」** に切り替えてから、再認証してください。
 
-### `users:read.email` のエラーが出る
+```bash
+python setup.py --reauth
+```
 
-プライベートチャンネルのメンバー共有にはメールアドレスが必要です。
-Slack AppのBot Token Scopesに `users:read.email` を追加し、アプリを再インストールしてください。
+### `Google の認証ファイル drive_token.json がありません`
 
-### スプレッドシートに書き込めない
+`python setup.py` を実行してください。
 
-- サービスアカウントのメールアドレスがスプレッドシートに **「編集者」** として共有されているか確認
-- Google Sheets API が有効か確認
+### `drive_token.json に必要な権限がありません`
+
+Sheets と Drive の認証が1本化される前のトークンです（Drive権限しか持っていません）。
+`python setup.py --reauth` で認証をやり直してください。
+
+### `[設定エラー] GOOGLE_SPREADSHEET_ID が .env に設定されていません`
+
+`python setup.py` を実行すると、スプレッドシートを自動作成してIDを `.env` に書き込みます。
+
+### スコープ不足のエラーが出る
+
+`python setup.py` の 1/4 が必要なスコープをすべて検証します。不足していれば名前を挙げるので、
+`slack-app-manifest.yml` を App Manifest 画面に貼り直し、アプリを再インストールしてください。
 
 ### botがチャンネルのメッセージを取得できない
 

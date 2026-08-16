@@ -4,19 +4,17 @@ Public channels  → shared spreadsheet (anyone with link), tabs per channel
 Private channels → separate spreadsheet per channel, shared with members only
 """
 
-import json
 import logging
-import os
 import re
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 
 import gspread
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 import config
+from google_auth import load_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +61,6 @@ def _appended_row_number(response) -> int | None:
     digits = re.sub(r"[^0-9]", "", first_cell)
     return int(digits) if digits else None
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
 HEADER_ROW = [
     "日時",
     "チャンネル",
@@ -102,20 +95,10 @@ THREAD_PREFIX = "└ "
 
 class SheetsHandler:
     def __init__(self):
-        self._sa_creds = Credentials.from_service_account_file(
-            config.GOOGLE_SERVICE_ACCOUNT_FILE, scopes=SCOPES
-        )
-        # Service account client for reading/writing existing spreadsheets
-        self.gc = gspread.authorize(self._sa_creds)
+        creds = load_credentials()
+        self.gc = gspread.authorize(creds)
         self.public_spreadsheet = self.gc.open_by_key(config.GOOGLE_SPREADSHEET_ID)
-
-        # OAuth2 client for creating new spreadsheets (service accounts have no Drive quota)
-        self._oauth_creds = None
-        self._oauth_gc = self._load_oauth_client()
-        if self._oauth_creds:
-            self._oauth_drive = build("drive", "v3", credentials=self._oauth_creds)
-        else:
-            self._oauth_drive = build("drive", "v3", credentials=self._sa_creds)
+        self._drive = build("drive", "v3", credentials=creds)
 
         self.drive_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
         self._sheet_cache: dict[str, gspread.Worksheet] = {}
@@ -126,34 +109,6 @@ class SheetsHandler:
         # thread. Without this, two writers can interleave their read-then-append
         # and duplicate rows or clobber each other's insert positions.
         self._lock = threading.RLock()
-
-    def _load_oauth_client(self) -> gspread.Client | None:
-        """Load OAuth2 gspread client for creating new files."""
-        token_file = config.GOOGLE_DRIVE_TOKEN_FILE
-        if not os.path.exists(token_file):
-            logger.warning("No OAuth2 token found - private channel spreadsheets may fail")
-            return None
-
-        from google.oauth2.credentials import Credentials as OAuthCredentials
-        from google.auth.transport.requests import Request
-
-        creds = OAuthCredentials.from_authorized_user_file(token_file)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            token_data = {
-                "token": creds.token,
-                "refresh_token": creds.refresh_token,
-                "token_uri": creds.token_uri,
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "scopes": list(creds.scopes or SCOPES),
-            }
-            with open(token_file, "w") as f:
-                json.dump(token_data, f, indent=2)
-
-        logger.info("OAuth2 client loaded for private spreadsheet creation")
-        self._oauth_creds = creds
-        return gspread.authorize(creds)
 
     # ── Sheet formatting ──
 
@@ -408,14 +363,13 @@ class SheetsHandler:
 
         ss_name = f"Slack Log - #{channel_name}"
 
-        # Search using OAuth2 Drive client
         query = (
             f"name = '{ss_name}' and "
             f"'{self.drive_folder_id}' in parents and "
             f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
             f"trashed = false"
         )
-        results = self._oauth_drive.files().list(
+        results = self._drive.files().list(
             q=query, fields="files(id, name)", pageSize=1
         ).execute()
         files = results.get("files", [])
@@ -423,13 +377,7 @@ class SheetsHandler:
         if files:
             ss = self.gc.open_by_key(files[0]["id"])
         else:
-            # Create with OAuth2 client (service account has no Drive quota)
-            creator = self._oauth_gc or self.gc
-            ss = creator.create(ss_name, folder_id=self.drive_folder_id)
-
-            # Share with service account so it can read/write
-            sa_email = self._sa_creds.service_account_email
-            ss.share(sa_email, perm_type="user", role="writer", notify=False)
+            ss = self.gc.create(ss_name, folder_id=self.drive_folder_id)
 
             for email in member_emails:
                 try:
