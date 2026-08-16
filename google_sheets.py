@@ -160,6 +160,24 @@ JST = timezone(timedelta(hours=9))
 
 THREAD_PREFIX = "└ "
 
+# Collapsing an outline group only hides the rows; Sheets shows nothing in
+# their place. The parent stays visible, so the count goes there — otherwise a
+# folded thread is indistinguishable from a message that has no replies.
+REPLY_COUNT_SUFFIX = "  💬{count}"
+REPLY_COUNT_PATTERN = re.compile(r"\s*💬\d+$")
+
+
+def strip_reply_count(text: str) -> str:
+    return REPLY_COUNT_PATTERN.sub("", text)
+
+
+def with_reply_count(text: str, count: int) -> str:
+    """Append the reply count to a parent message, replacing any stale one."""
+    base = strip_reply_count(text)
+    if count <= 0:
+        return base
+    return base + REPLY_COUNT_SUFFIX.format(count=count)
+
 
 def mark_thread_reply(text: str) -> str:
     """Mark a reply with the thread glyph.
@@ -417,6 +435,56 @@ class SheetsHandler:
             _retry(spreadsheet.batch_update, {"requests": requests})
         except Exception as e:
             logger.warning(f"Failed to set row heights: {e}")
+
+    def reply_count_requests(
+        self, sheet_id: int, rows: list[list[str]]
+    ) -> list[dict]:
+        """Refresh the reply count shown on each parent message.
+
+        Counts come from the sheet rather than the batch being written: a
+        thread gains replies over time, and the parent may have been written
+        long before them.
+        """
+        counts: dict[str, int] = {}
+        for row in rows:
+            thread_ts = row[THREAD_TS_COLUMN - 1] if len(row) >= THREAD_TS_COLUMN else ""
+            ts = row[TS_COLUMN - 1] if len(row) >= TS_COLUMN else ""
+            if thread_ts and thread_ts != ts:
+                counts[thread_ts] = counts.get(thread_ts, 0) + 1
+
+        requests = []
+        for offset, row in enumerate(rows):
+            ts = row[TS_COLUMN - 1] if len(row) >= TS_COLUMN else ""
+            thread_ts = row[THREAD_TS_COLUMN - 1] if len(row) >= THREAD_TS_COLUMN else ""
+            if not ts or (thread_ts and thread_ts != ts):
+                continue
+            current = row[MESSAGE_COLUMN - 1] if len(row) >= MESSAGE_COLUMN else ""
+            wanted = with_reply_count(current, counts.get(ts, 0))
+            if wanted == current:
+                continue
+            requests.append({
+                "updateCells": {
+                    "rows": [{"values": [{"userEnteredValue": {"stringValue": wanted}}]}],
+                    "fields": "userEnteredValue",
+                    "start": {
+                        "sheetId": sheet_id,
+                        "rowIndex": offset + 1,          # +1 for the header
+                        "columnIndex": MESSAGE_COLUMN - 1,
+                    },
+                }
+            })
+        return requests
+
+    def sync_reply_counts(
+        self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet
+    ):
+        try:
+            rows = _retry(worksheet.get_all_values)[1:]
+            requests = self.reply_count_requests(worksheet.id, rows)
+            if requests:
+                _retry(spreadsheet.batch_update, {"requests": requests})
+        except Exception as e:
+            logger.warning(f"Failed to refresh reply counts: {e}")
 
     def thread_group_requests(
         self, sheet_id: int, start_row: int, rows_data: list[dict]
@@ -996,6 +1064,8 @@ class SheetsHandler:
                     logger.warning(f"Failed to style row {inserted_row}: {e}")
 
             existing.add(ts)
+            if is_thread_reply:
+                self.sync_reply_counts(worksheet, spreadsheet)
 
         logger.info(
             f"Logged: #{channel_name} @{username} ({self._ts_to_datetime(ts)})"
@@ -1143,6 +1213,7 @@ class SheetsHandler:
                     logger.warning(f"Failed to link attachment names: {e}")
             self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
             self.apply_thread_groups(worksheet, spreadsheet, start_row, ordered_msgs)
+            self.sync_reply_counts(worksheet, spreadsheet)
         else:
             logger.warning(
                 f"Could not determine written row range for #{channel_name}; "
