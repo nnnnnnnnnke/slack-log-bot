@@ -734,19 +734,27 @@ class SheetsHandler:
             self._channel_spreadsheets.clear()
             self._formatted_sheets.clear()
 
-    def backup_and_reset_channel(self, channel_name: str, member_emails: list[str] | None = None) -> str | None:
+    def backup_and_reset_channel(
+        self, channel_name: str, member_emails: list[str] | None = None,
+        channel_id: str = "",
+    ) -> str | None:
         """Backup the channel tab, delete it, and clear cache. Returns backup tab name."""
         with self._lock:
             return self._backup_and_reset_channel_locked(
-                channel_name, member_emails,
+                channel_name, member_emails, channel_id,
             )
 
-    def _backup_and_reset_channel_locked(self, channel_name: str, member_emails: list[str] | None = None) -> str | None:
+    def _backup_and_reset_channel_locked(
+        self, channel_name: str, member_emails: list[str] | None = None,
+        channel_id: str = "",
+    ) -> str | None:
         now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
         backup_name = f"{channel_name}_bak_{now_str}"
 
         try:
-            ss = self._get_or_create_channel_spreadsheet(channel_name, member_emails)
+            ss = self._get_or_create_channel_spreadsheet(
+                channel_name, member_emails, channel_id
+            )
         except Exception as e:
             logger.error(f"Failed to open #{channel_name}: {e}")
             return None
@@ -911,13 +919,14 @@ class SheetsHandler:
     def update_attachment_links(
         self, channel_name: str, ts: str, attachments: list[tuple[str, str]],
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ):
         """Fill in the attachment cell once the background uploads finish."""
         if not attachments:
             return
         try:
             with self._lock:
-                worksheet = self._get_worksheet(channel_name, member_emails)
+                worksheet = self._get_worksheet(channel_name, member_emails, channel_id)
                 ts_values = _retry(worksheet.col_values, TS_COLUMN)
                 spreadsheet = self._get_spreadsheet(channel_name)
                 for i, val in enumerate(ts_values):
