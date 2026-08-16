@@ -158,8 +158,6 @@ CHANNEL_ID_PROPERTY = "slackChannelId"
 
 JST = timezone(timedelta(hours=9))
 
-THREAD_PREFIX = "└ "
-
 # Collapsing an outline group only hides the rows; Sheets shows nothing in
 # their place. The parent stays visible, so the count goes there — otherwise a
 # folded thread is indistinguishable from a message that has no replies.
@@ -177,22 +175,6 @@ def with_reply_count(text: str, count: int) -> str:
     if count <= 0:
         return base
     return base + REPLY_COUNT_SUFFIX.format(count=count)
-
-
-def mark_thread_reply(text: str) -> str:
-    """Mark a reply with the thread glyph.
-
-    A multi-line reply puts the marker on a line of its own so every line of
-    the message starts at the same place. Indenting the later lines instead
-    only lines up in a monospaced font: the sheet's font is proportional, and
-    "└ " there is far wider than the two spaces that would stand in for it.
-
-    A single-line reply keeps the marker inline, where there is nothing to
-    line up with and a second line would only cost height.
-    """
-    if "\n" not in text:
-        return THREAD_PREFIX + text
-    return THREAD_PREFIX.rstrip() + "\n" + text
 
 
 class SheetsHandler:
@@ -836,11 +818,10 @@ class SheetsHandler:
         marker adds a line to a multi-line reply, and a height measured
         without it comes up one line short.
         """
-        text = msg.get("text", "")
-        thread_ts = msg.get("thread_ts")
-        if thread_ts and thread_ts != msg.get("ts"):
-            return mark_thread_reply(text)
-        return text
+        # A reply carries no marker in the text: the green background and the
+        # outline group it sits in already say what it is, and a glyph in the
+        # message column is one more thing to strip when the text is reused.
+        return msg.get("text", "")
 
     def _build_row(
         self,
@@ -850,14 +831,10 @@ class SheetsHandler:
         thread_ts: str | None,
         attachments: list[tuple[str, str]],
     ) -> list[str]:
-        # Thread replies get a visual prefix
-        is_reply = thread_ts and thread_ts != ts
-        display_text = mark_thread_reply(text) if is_reply else text
-
         return [
             self._ts_to_datetime(ts),
             f"@{username}",
-            display_text,
+            text,
             "\n".join(name for name, _ in attachments),
             ts,
             thread_ts or "",
@@ -1042,8 +1019,7 @@ class SheetsHandler:
                 inserted_row = _appended_row_number(resp)
             if inserted_row:
                 requests = self._row_height_requests(
-                    worksheet.id, inserted_row,
-                    [mark_thread_reply(text) if is_thread_reply else text],
+                    worksheet.id, inserted_row, [text]
                 )
                 if attachments:
                     requests.append(self._attachment_cell_request(
