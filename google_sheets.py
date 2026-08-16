@@ -979,7 +979,16 @@ class SheetsHandler:
         spreadsheet = self._get_spreadsheet(channel_name)
         existing = self._load_existing_ts(channel_name, worksheet)
 
-        new_messages = [m for m in messages if m["ts"] not in existing]
+        # Deduplicate within the batch as well as against the sheet: the same
+        # message can be collected twice in one pass, from the channel history
+        # and from its thread.
+        new_messages = []
+        seen = set(existing)
+        for message in messages:
+            if message["ts"] in seen:
+                continue
+            seen.add(message["ts"])
+            new_messages.append(message)
         skip_count = len(messages) - len(new_messages)
 
         if not new_messages:

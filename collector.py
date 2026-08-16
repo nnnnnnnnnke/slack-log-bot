@@ -96,9 +96,14 @@ def fetch_channel_messages(
             if message.get("user", "") in skip_user_ids:
                 continue
 
+            # Not None: a message broadcast to the channel from a thread comes
+            # back from history carrying its thread_ts, and appears again in
+            # that thread's replies. Forcing None here made the two copies look
+            # like different rows — one a parent, one a reply — and both were
+            # kept.
             entry = _build_entry(
                 client, drive, message, channel_name, member_emails, known_ts,
-                None, channel_id,
+                message.get("thread_ts"), channel_id,
             )
             if entry is None:
                 continue
