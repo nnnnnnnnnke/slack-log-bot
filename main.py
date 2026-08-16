@@ -4,7 +4,6 @@ import logging
 import re
 import sys
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 from slack_bolt import App
@@ -13,7 +12,13 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 import config
 from google_sheets import SheetsHandler
 from google_drive import DriveHandler
-from slack_utils import get_channel_info, get_user_info, get_member_emails
+from slack_utils import (
+    build_permalink,
+    get_channel_info,
+    get_member_emails,
+    get_user_info,
+    install_retry_handlers,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,16 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = App(token=config.SLACK_BOT_TOKEN)
+install_retry_handlers(app.client)
 sheets = SheetsHandler()
 drive = DriveHandler()
-
-
-def get_permalink(client, channel_id: str, message_ts: str) -> str:
-    try:
-        result = client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
-        return result.get("permalink", "")
-    except Exception:
-        return ""
 
 
 def process_files(
@@ -75,7 +73,7 @@ def handle_message(event, client, logger):
     member_emails = get_member_emails(client, channel_id) if is_private else None
 
     display_name, username, _ = get_user_info(client, user_id)
-    permalink = get_permalink(client, channel_id, ts)
+    permalink = build_permalink(client, channel_id, ts, thread_ts)
 
     # Log message immediately (without waiting for file uploads)
     try:
@@ -117,8 +115,7 @@ def handle_mention(event, client, say, logger):
     @bot              → Show spreadsheet URL + help
     @bot backfill     → Collect past messages (default 90 days)
     @bot backfill 30  → Collect past 30 days
-    @bot reset        → Backup & reset this channel's sheet
-    @bot reset all    → Backup & reset all public channel sheets
+    @bot reset        → Backup & reset this channel's sheet (private channels only)
     @bot clear cache  → Clear in-memory caches
     """
     channel_id = event.get("channel", "")
@@ -158,7 +155,7 @@ def handle_mention(event, client, say, logger):
 
         threading.Thread(target=run_backfill, daemon=True).start()
 
-    elif cleaned == "reset all" or cleaned.startswith("reset"):
+    elif cleaned.startswith("reset"):
         if not is_private:
             say(":no_entry_sign: パブリックチャンネルのリセットは無効です。プライベートチャンネルでのみ使用できます。")
             return
@@ -215,7 +212,7 @@ def handle_mention(event, client, say, logger):
         )
 
     else:
-        say(f":thinking_face: 不明なコマンドです。`@Log Bot help` でコマンド一覧を確認できます。")
+        say(":thinking_face: 不明なコマンドです。`@Log Bot help` でコマンド一覧を確認できます。")
 
 
 def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bool, days: int):
@@ -253,13 +250,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
             files = msg.get("files", [])
 
             display_name, username, _ = get_user_info(client, user_id)
-
-            permalink = ""
-            try:
-                result = client.chat_getPermalink(channel=channel_id, message_ts=ts)
-                permalink = result.get("permalink", "")
-            except Exception:
-                pass
+            permalink = build_permalink(client, channel_id, ts)
 
             attachment_links = []
             for f in files:
@@ -301,15 +292,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
                         r_files = reply.get("files", [])
 
                         r_display, r_username, _ = get_user_info(client, r_user)
-
-                        r_permalink = ""
-                        try:
-                            result = client.chat_getPermalink(
-                                channel=channel_id, message_ts=r_ts
-                            )
-                            r_permalink = result.get("permalink", "")
-                        except Exception:
-                            pass
+                        r_permalink = build_permalink(client, channel_id, r_ts, ts)
 
                         r_links = []
                         for f in r_files:
@@ -334,12 +317,9 @@ def _backfill_channel(client, channel_id: str, channel_name: str, is_private: bo
                 except Exception as e:
                     logger.error(f"Failed to fetch thread replies: {e}")
 
-            time.sleep(0.5)
-
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
-        time.sleep(1)
 
     new_count, skip_count = sheets.write_messages_grouped(
         channel_name, collected, is_private, member_emails,

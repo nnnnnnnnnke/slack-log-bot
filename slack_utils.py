@@ -1,15 +1,39 @@
 """Slack utility functions shared across modules."""
 
 import logging
+import time
 
 logger = logging.getLogger(__name__)
+
+# Member lists change over time, so their cache expires. Channel and user info
+# are effectively immutable for our purposes and are cached for the process life.
+MEMBER_EMAIL_CACHE_TTL = 600  # seconds
 
 # Cache: channel_id -> ChannelInfo
 _channel_info_cache: dict[str, dict] = {}
 # Cache: user_id -> (display_name, username, email)
 _user_info_cache: dict[str, tuple[str, str, str]] = {}
-# Cache: channel_id -> list of member emails
-_member_emails_cache: dict[str, list[str]] = {}
+# Cache: channel_id -> (cached_at_monotonic, list of member emails)
+_member_emails_cache: dict[str, tuple[float, list[str]]] = {}
+# Workspace base URL (e.g. "https://myteam.slack.com"), resolved once via auth.test
+_team_url: str | None = None
+
+
+def install_retry_handlers(client):
+    """Make a Slack client retry on rate limits and connection errors.
+
+    The SDK honours the Retry-After header, which is far more accurate than
+    sprinkling fixed sleeps through the collection loops.
+    """
+    from slack_sdk.http_retry.builtin_handlers import (
+        ConnectionErrorRetryHandler,
+        RateLimitErrorRetryHandler,
+    )
+
+    installed = {type(h) for h in client.retry_handlers}
+    for handler_cls in (ConnectionErrorRetryHandler, RateLimitErrorRetryHandler):
+        if handler_cls not in installed:
+            client.retry_handlers.append(handler_cls(max_retry_count=3))
 
 
 def get_channel_info(client, channel_id: str) -> dict:
@@ -54,10 +78,44 @@ def get_user_info(client, user_id: str) -> tuple[str, str, str]:
         return (user_id, user_id, "")
 
 
+def get_team_url(client) -> str:
+    """Return the workspace base URL (no trailing slash), e.g. https://myteam.slack.com."""
+    global _team_url
+    if _team_url is None:
+        try:
+            resp = client.auth_test()
+            _team_url = (resp.get("url") or "").rstrip("/")
+        except Exception as e:
+            logger.error(f"Failed to resolve workspace URL via auth.test: {e}")
+            _team_url = ""
+    return _team_url
+
+
+def build_permalink(
+    client, channel_id: str, ts: str, thread_ts: str | None = None
+) -> str:
+    """Build a message permalink locally instead of calling chat.getPermalink.
+
+    Permalinks are a pure function of (workspace URL, channel ID, ts), so calling
+    the API once per message just burns rate limit and makes backfills crawl.
+    """
+    base = get_team_url(client)
+    if not base or not ts:
+        return ""
+    link = f"{base}/archives/{channel_id}/p{ts.replace('.', '')}"
+    if thread_ts and thread_ts != ts:
+        link += f"?thread_ts={thread_ts}&cid={channel_id}"
+    return link
+
+
 def get_member_emails(client, channel_id: str) -> list[str]:
-    """Get Google-compatible email addresses for all members of a channel."""
-    if channel_id in _member_emails_cache:
-        return _member_emails_cache[channel_id]
+    """Get Google-compatible email addresses for all members of a channel.
+
+    Cached with a TTL so that members who join later still get access granted.
+    """
+    cached = _member_emails_cache.get(channel_id)
+    if cached and (time.monotonic() - cached[0]) < MEMBER_EMAIL_CACHE_TTL:
+        return cached[1]
 
     member_ids = []
     cursor = None
@@ -72,6 +130,10 @@ def get_member_emails(client, channel_id: str) -> list[str]:
                 break
         except Exception as e:
             logger.error(f"Failed to get channel members: {e}")
+            # Keep serving the stale list rather than silently dropping members
+            # from the share list on a transient API failure.
+            if cached:
+                return cached[1]
             break
 
     emails = []
@@ -82,5 +144,5 @@ def get_member_emails(client, channel_id: str) -> list[str]:
         else:
             logger.warning(f"No email for user {uid}, skipping permission grant")
 
-    _member_emails_cache[channel_id] = emails
+    _member_emails_cache[channel_id] = (time.monotonic(), emails)
     return emails

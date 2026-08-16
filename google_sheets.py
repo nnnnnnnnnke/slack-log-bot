@@ -7,6 +7,9 @@ Private channels → separate spreadsheet per channel, shared with members only
 import json
 import logging
 import os
+import re
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 import gspread
@@ -16,6 +19,49 @@ from googleapiclient.discovery import build
 import config
 
 logger = logging.getLogger(__name__)
+
+# Sheets allows 60 read + 60 write requests per minute per user. A busy
+# workspace blows through that, so every API call gets backed off and retried.
+MAX_RETRIES = 5
+INITIAL_BACKOFF = 2.0
+# 429 means the request was rejected outright, so retrying can never duplicate
+# a write. 5xx is ambiguous, so it is only retried for idempotent operations.
+RATE_LIMIT_STATUS = (429,)
+TRANSIENT_STATUS = (429, 500, 502, 503, 504)
+
+
+def _retry(fn, *args, idempotent: bool = True, **kwargs):
+    """Call a gspread/Sheets operation, backing off on rate limits."""
+    retry_on = TRANSIENT_STATUS if idempotent else RATE_LIMIT_STATUS
+    delay = INITIAL_BACKOFF
+    for attempt in range(MAX_RETRIES):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status not in retry_on or attempt == MAX_RETRIES - 1:
+                raise
+            logger.warning(
+                f"Sheets API {status} on {getattr(fn, '__name__', fn)}, "
+                f"retrying in {delay:.0f}s ({attempt + 1}/{MAX_RETRIES - 1})"
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
+def _appended_row_number(response) -> int | None:
+    """Extract the row number a write landed on from a Sheets API response.
+
+    The response carries updatedRange like "'general'!A42:I42"; worksheet.row_count
+    is the size of the grid (1000 by default), not the last populated row.
+    """
+    try:
+        updated_range = response["updates"]["updatedRange"]
+    except (TypeError, KeyError):
+        return None
+    first_cell = updated_range.split("!")[-1].split(":")[0]
+    digits = re.sub(r"[^0-9]", "", first_cell)
+    return int(digits) if digits else None
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -76,6 +122,10 @@ class SheetsHandler:
         self._existing_ts: dict[str, set[str]] = {}
         self._private_spreadsheets: dict[str, gspread.Spreadsheet] = {}
         self._formatted_sheets: set[str] = set()
+        # Bolt dispatches events concurrently, and backfills run on their own
+        # thread. Without this, two writers can interleave their read-then-append
+        # and duplicate rows or clobber each other's insert positions.
+        self._lock = threading.RLock()
 
     def _load_oauth_client(self) -> gspread.Client | None:
         """Load OAuth2 gspread client for creating new files."""
@@ -249,7 +299,7 @@ class SheetsHandler:
         })
 
         try:
-            spreadsheet.batch_update({"requests": requests})
+            _retry(spreadsheet.batch_update, {"requests": requests})
             logger.info(f"Applied formatting to sheet: {worksheet.title}")
         except Exception as e:
             logger.warning(f"Failed to apply formatting: {e}")
@@ -288,7 +338,7 @@ class SheetsHandler:
 
         if requests:
             try:
-                spreadsheet.batch_update({"requests": requests})
+                _retry(spreadsheet.batch_update, {"requests": requests})
             except Exception as e:
                 logger.warning(f"Failed to format thread rows: {e}")
 
@@ -302,7 +352,7 @@ class SheetsHandler:
         sheet_id = worksheet.id
         row_index = row_number - 1  # 0-indexed
         try:
-            spreadsheet.batch_update({"requests": [{
+            _retry(spreadsheet.batch_update, {"requests": [{
                 "repeatCell": {
                     "range": {
                         "sheetId": sheet_id,
@@ -332,10 +382,12 @@ class SheetsHandler:
         try:
             worksheet = self.public_spreadsheet.worksheet(channel_name)
         except gspread.exceptions.WorksheetNotFound:
-            worksheet = self.public_spreadsheet.add_worksheet(
-                title=channel_name, rows=1000, cols=len(HEADER_ROW)
+            worksheet = _retry(
+                self.public_spreadsheet.add_worksheet,
+                title=channel_name, rows=1000, cols=len(HEADER_ROW),
+                idempotent=False,
             )
-            worksheet.append_row(HEADER_ROW)
+            _retry(worksheet.append_row, HEADER_ROW, idempotent=False)
             is_new = True
             logger.info(f"Created public sheet tab: {channel_name}")
 
@@ -402,11 +454,11 @@ class SheetsHandler:
 
         worksheet = ss.sheet1
         if worksheet.title != channel_name:
-            worksheet.update_title(channel_name)
+            _retry(worksheet.update_title, channel_name, idempotent=False)
 
         is_new = False
-        if worksheet.row_count == 0 or not worksheet.row_values(1):
-            worksheet.append_row(HEADER_ROW)
+        if worksheet.row_count == 0 or not _retry(worksheet.row_values, 1):
+            _retry(worksheet.append_row, HEADER_ROW, idempotent=False)
             is_new = True
 
         if is_new or channel_name not in self._formatted_sheets:
@@ -435,7 +487,7 @@ class SheetsHandler:
         if channel_name in self._existing_ts:
             return self._existing_ts[channel_name]
         try:
-            ts_values = worksheet.col_values(TS_COLUMN)
+            ts_values = _retry(worksheet.col_values, TS_COLUMN)
             existing = set(ts_values[1:]) if len(ts_values) > 1 else set()
         except Exception as e:
             logger.warning(f"Failed to load existing TS for #{channel_name}: {e}")
@@ -481,6 +533,10 @@ class SheetsHandler:
 
     def clear_cache(self, channel_name: str | None = None):
         """Clear in-memory caches. If channel_name is None, clear all."""
+        with self._lock:
+            self._clear_cache_locked(channel_name)
+
+    def _clear_cache_locked(self, channel_name: str | None = None):
         if channel_name:
             self._sheet_cache.pop(channel_name, None)
             self._existing_ts.pop(channel_name, None)
@@ -496,6 +552,14 @@ class SheetsHandler:
         self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None,
     ) -> str | None:
         """Backup the channel tab, delete it, and clear cache. Returns backup tab name."""
+        with self._lock:
+            return self._backup_and_reset_channel_locked(
+                channel_name, is_private, member_emails,
+            )
+
+    def _backup_and_reset_channel_locked(
+        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None,
+    ) -> str | None:
         now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
         backup_name = f"{channel_name}_bak_{now_str}"
 
@@ -532,34 +596,6 @@ class SheetsHandler:
         self.clear_cache(channel_name)
         return backup_name
 
-    def backup_and_reset_all(self) -> list[str]:
-        """Backup and delete all channel tabs in the public spreadsheet. Returns backup names."""
-        now_str = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
-        backup_names = []
-
-        worksheets = self.public_spreadsheet.worksheets()
-        # Ensure a default tab exists (Sheets requires at least one)
-        default_exists = any(ws.title == "シート1" for ws in worksheets)
-        if not default_exists:
-            self.public_spreadsheet.add_worksheet(title="シート1", rows=1, cols=1)
-
-        for ws in worksheets:
-            if ws.title == "シート1" or ws.title.endswith(f"_bak_{now_str}"):
-                continue
-            if ws.title.startswith("_bak_") or "_bak_" in ws.title:
-                continue
-            backup_name = f"{ws.title}_bak_{now_str}"
-            try:
-                self.public_spreadsheet.duplicate_sheet(ws.id, new_sheet_name=backup_name)
-                self.public_spreadsheet.del_worksheet(ws)
-                backup_names.append(backup_name)
-                logger.info(f"Backup & reset: {ws.title} -> {backup_name}")
-            except Exception as e:
-                logger.error(f"Failed to backup/reset {ws.title}: {e}")
-
-        self.clear_cache()
-        return backup_names
-
     def get_spreadsheet_url(self, channel_name: str, is_private: bool = False) -> str | None:
         """Return the spreadsheet URL for a channel."""
         if is_private and channel_name in self._private_spreadsheets:
@@ -583,37 +619,50 @@ class SheetsHandler:
         is_private: bool = False,
         member_emails: list[str] | None = None,
     ) -> bool:
-        worksheet = self._get_worksheet(channel_name, is_private, member_emails)
-        spreadsheet = self._get_spreadsheet(channel_name, is_private)
+        with self._lock:
+            worksheet = self._get_worksheet(channel_name, is_private, member_emails)
+            spreadsheet = self._get_spreadsheet(channel_name, is_private)
 
-        existing = self._load_existing_ts(channel_name, worksheet)
-        if ts in existing:
-            return False
+            existing = self._load_existing_ts(channel_name, worksheet)
+            if ts in existing:
+                return False
 
-        row = self._build_row(
-            channel_name, display_name, username, text,
-            ts, thread_ts, attachment_links, permalink,
-        )
+            row = self._build_row(
+                channel_name, display_name, username, text,
+                ts, thread_ts, attachment_links, permalink,
+            )
 
-        is_thread_reply = thread_ts and thread_ts != ts
-        inserted_row = None
+            is_thread_reply = thread_ts and thread_ts != ts
+            inserted_row = None
 
-        if is_thread_reply:
-            insert_pos = self._find_thread_insert_position(worksheet, thread_ts)
-            if insert_pos:
-                worksheet.insert_row(row, insert_pos, value_input_option="RAW")
-                inserted_row = insert_pos
+            if is_thread_reply:
+                insert_pos = self._find_thread_insert_position(worksheet, thread_ts)
+                if insert_pos:
+                    _retry(
+                        worksheet.insert_row, row, insert_pos,
+                        value_input_option="RAW", idempotent=False,
+                    )
+                    inserted_row = insert_pos
+                else:
+                    # Parent isn't in the sheet (e.g. posted before the bot joined),
+                    # so the reply just goes at the end.
+                    resp = _retry(
+                        worksheet.append_row, row,
+                        value_input_option="RAW", idempotent=False,
+                    )
+                    inserted_row = _appended_row_number(resp)
             else:
-                worksheet.append_row(row, value_input_option="RAW")
-                inserted_row = worksheet.row_count
-        else:
-            worksheet.append_row(row, value_input_option="RAW")
+                _retry(
+                    worksheet.append_row, row,
+                    value_input_option="RAW", idempotent=False,
+                )
 
-        # Color thread reply row
-        if is_thread_reply and inserted_row:
-            self._format_single_thread_row(worksheet, spreadsheet, inserted_row)
+            # Color thread reply row
+            if is_thread_reply and inserted_row:
+                self._format_single_thread_row(worksheet, spreadsheet, inserted_row)
 
-        existing.add(ts)
+            existing.add(ts)
+
         logger.info(
             f"Logged: #{channel_name} {display_name} (@{username}) ({self._ts_to_datetime(ts)})"
         )
@@ -627,21 +676,26 @@ class SheetsHandler:
         if not attachment_links:
             return
         try:
-            worksheet = self._get_worksheet(channel_name, is_private, member_emails)
-            ts_values = worksheet.col_values(TS_COLUMN)
-            for i, val in enumerate(ts_values):
-                if val == ts:
-                    row_num = i + 1  # 1-indexed
-                    worksheet.update_cell(row_num, ATTACHMENT_COLUMN, "\n".join(attachment_links))
-                    logger.info(f"Updated attachments for ts={ts} in #{channel_name}")
-                    return
+            with self._lock:
+                worksheet = self._get_worksheet(channel_name, is_private, member_emails)
+                ts_values = _retry(worksheet.col_values, TS_COLUMN)
+                for i, val in enumerate(ts_values):
+                    if val == ts:
+                        row_num = i + 1  # 1-indexed
+                        _retry(
+                            worksheet.update_cell, row_num, ATTACHMENT_COLUMN,
+                            "\n".join(attachment_links),
+                        )
+                        logger.info(f"Updated attachments for ts={ts} in #{channel_name}")
+                        return
+            logger.warning(f"No row found for ts={ts} in #{channel_name}, attachments not linked")
         except Exception as e:
             logger.error(f"Failed to update attachment links: {e}")
 
     def _find_thread_insert_position(self, worksheet: gspread.Worksheet, thread_ts: str) -> int | None:
         try:
-            all_ts = worksheet.col_values(TS_COLUMN)
-            all_thread_ts = worksheet.col_values(THREAD_TS_COLUMN)
+            all_ts = _retry(worksheet.col_values, TS_COLUMN)
+            all_thread_ts = _retry(worksheet.col_values, THREAD_TS_COLUMN)
         except Exception:
             return None
 
@@ -661,6 +715,18 @@ class SheetsHandler:
     # ── Batch write (collect_weekly.py, backfill.py) ──
 
     def write_messages_grouped(
+        self,
+        channel_name: str,
+        messages: list[dict],
+        is_private: bool = False,
+        member_emails: list[str] | None = None,
+    ) -> tuple[int, int]:
+        with self._lock:
+            return self._write_messages_grouped_locked(
+                channel_name, messages, is_private, member_emails,
+            )
+
+    def _write_messages_grouped_locked(
         self,
         channel_name: str,
         messages: list[dict],
@@ -707,14 +773,21 @@ class SheetsHandler:
                 ordered_msgs.append(msg)
                 existing.add(msg["ts"])
 
-        # Get current row count to know where new rows will start
-        start_row = len(worksheet.col_values(1)) + 1  # 1-indexed, after existing data
-
-        # Batch append
-        worksheet.append_rows(rows, value_input_option="RAW")
+        # Batch append; the response tells us exactly where the rows landed
+        resp = _retry(
+            worksheet.append_rows, rows,
+            value_input_option="RAW", idempotent=False,
+        )
+        start_row = _appended_row_number(resp)
 
         # Apply thread reply background colors
-        self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
+        if start_row:
+            self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
+        else:
+            logger.warning(
+                f"Could not determine written row range for #{channel_name}; "
+                f"skipping thread row colouring"
+            )
 
         new_count = len(rows)
         logger.info(f"Wrote {new_count} messages (grouped) to #{channel_name}")

@@ -16,7 +16,6 @@ Usage:
 import argparse
 import logging
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 
 from slack_sdk import WebClient
@@ -24,7 +23,12 @@ from slack_sdk import WebClient
 import config
 from google_sheets import SheetsHandler
 from google_drive import DriveHandler
-from slack_utils import get_user_info, get_member_emails
+from slack_utils import (
+    build_permalink,
+    get_member_emails,
+    get_user_info,
+    install_retry_handlers,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 def collect(channel_filter: str | None = None, days: int = 8):
     client = WebClient(token=config.SLACK_BOT_TOKEN)
+    install_retry_handlers(client)
     sheets = SheetsHandler()
     drive = DriveHandler()
 
@@ -110,13 +115,7 @@ def collect(channel_filter: str | None = None, days: int = 8):
                 files = msg.get("files", [])
 
                 display_name, username, _ = get_user_info(client, user_id)
-
-                permalink = ""
-                try:
-                    result = client.chat_getPermalink(channel=ch_id, message_ts=ts)
-                    permalink = result.get("permalink", "")
-                except Exception:
-                    pass
+                permalink = build_permalink(client, ch_id, ts)
 
                 attachment_links = []
                 for f in files:
@@ -158,15 +157,7 @@ def collect(channel_filter: str | None = None, days: int = 8):
                             r_files = reply.get("files", [])
 
                             r_display, r_username, _ = get_user_info(client, r_user)
-
-                            r_permalink = ""
-                            try:
-                                result = client.chat_getPermalink(
-                                    channel=ch_id, message_ts=r_ts
-                                )
-                                r_permalink = result.get("permalink", "")
-                            except Exception:
-                                pass
+                            r_permalink = build_permalink(client, ch_id, r_ts, ts)
 
                             r_links = []
                             for f in r_files:
@@ -191,12 +182,9 @@ def collect(channel_filter: str | None = None, days: int = 8):
                     except Exception as e:
                         logger.error(f"Failed to fetch thread replies: {e}")
 
-                time.sleep(0.5)
-
             cursor = resp.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
-            time.sleep(1)
 
         # Phase 2: Write grouped by thread
         new_count, skip_count = sheets.write_messages_grouped(
