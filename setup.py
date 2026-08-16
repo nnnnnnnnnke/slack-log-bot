@@ -115,35 +115,92 @@ def write_env(values: dict[str, str]):
 
 # ── Step 1: Slack ──
 
+def check_token_shape(prefix: str):
+    def validate(value: str) -> str | None:
+        if not value.startswith(prefix):
+            return f"{prefix} で始まる必要があります"
+        if len(value.split("-")) < 4:
+            return "形式が違います。トークン全体をコピーできているか確認してください"
+        return None
+
+    return validate
+
+
+def warn_if_truncated(token: str, usual_len: int):
+    """A short trailing segment usually means the paste was cut off.
+
+    Only a warning: auth.test is the real gate, and hard-failing on length
+    would block anyone whose token Slack issues in a different shape.
+    """
+    secret = token.split("-")[-1]
+    if len(secret) < usual_len:
+        warn(
+            f"末尾が {len(secret)} 文字です（通常 {usual_len} 文字）。"
+            f"コピー時に切れているかもしれません。"
+        )
+
+
+AUTH_ERROR_HINTS = {
+    "invalid_auth": [
+        "トークンが途中で切れていないか（手動選択ではなく Copy ボタンを使う）",
+        "アプリをワークスペースにインストール済みか（Install App → Install to Workspace）",
+        "インストール後に表示された最新のトークンか（再インストールすると変わります）",
+        "別のアプリ／別のワークスペースのトークンを貼っていないか",
+    ],
+    "account_inactive": ["アプリがワークスペースからアンインストールされています。再インストールしてください"],
+    "token_revoked": ["トークンが失効しています。再インストールして新しいトークンを取得してください"],
+    "not_authed": ["トークンが空です"],
+}
+
+
 def check_slack(env: dict[str, str]) -> dict[str, str]:
     from slack_sdk import WebClient
     from slack_sdk.errors import SlackApiError
 
     step(1, "Slack トークンの確認")
 
-    if not env.get("SLACK_BOT_TOKEN"):
-        print("  Slack App の Bot User OAuth Token が必要です。")
-        print("  https://api.slack.com/apps → 対象アプリ → Install App")
-        env["SLACK_BOT_TOKEN"] = ask(
-            "SLACK_BOT_TOKEN (xoxb-...)",
-            lambda v: None if v.startswith("xoxb-") else "xoxb- で始まる必要があります",
-        )
-
     if not env.get("SLACK_APP_TOKEN"):
-        print("\n  Socket Mode 用の App-Level Token が必要です。")
+        print("  Socket Mode 用の App-Level Token が必要です。")
         print("  Basic Information → App-Level Tokens → connections:write")
-        env["SLACK_APP_TOKEN"] = ask(
-            "SLACK_APP_TOKEN (xapp-...)",
-            lambda v: None if v.startswith("xapp-") else "xapp- で始まる必要があります",
-        )
+        env["SLACK_APP_TOKEN"] = ask("SLACK_APP_TOKEN (xapp-...)", check_token_shape("xapp-"))
+        warn_if_truncated(env["SLACK_APP_TOKEN"], 64)
 
-    client = WebClient(token=env["SLACK_BOT_TOKEN"])
-    try:
-        resp = client.auth_test()
-    except SlackApiError as e:
-        fail(f"Slack に接続できません: {e.response.get('error', e)}")
-    except Exception as e:
-        fail(f"Slack に接続できません: {e}")
+    # Re-prompt on failure rather than exiting: re-running the whole wizard
+    # because one paste came up short is needless.
+    attempts = 3
+    resp = None
+
+    for attempt in range(attempts):
+        source_is_env = bool(env.get("SLACK_BOT_TOKEN"))
+        if not source_is_env:
+            print("\n  Slack App の Bot User OAuth Token が必要です。")
+            print("  https://api.slack.com/apps → 対象アプリ → OAuth & Permissions")
+            print("  （手動で選択せず Copy ボタンを使ってください）")
+            env["SLACK_BOT_TOKEN"] = ask(
+                "SLACK_BOT_TOKEN (xoxb-...)", check_token_shape("xoxb-")
+            )
+            warn_if_truncated(env["SLACK_BOT_TOKEN"], 24)
+
+        try:
+            resp = WebClient(token=env["SLACK_BOT_TOKEN"]).auth_test()
+            break
+        except SlackApiError as e:
+            code = e.response.get("error", "unknown")
+        except Exception as e:
+            fail(f"Slack に接続できません: {e}")
+
+        print()
+        warn(f"Slack が認証を拒否しました: {code}")
+        for hint in AUTH_ERROR_HINTS.get(code, ["トークンを確認してください"]):
+            print(f"    - {hint}")
+        if source_is_env:
+            print("    （このトークンは .env から読み込んだものです）")
+
+        if attempt == attempts - 1:
+            fail("トークンを確認できませんでした。")
+
+        print("\n  もう一度入力してください。")
+        env["SLACK_BOT_TOKEN"] = ""
 
     ok(f"接続成功: {resp.get('team')} / bot={resp.get('user')}")
 
