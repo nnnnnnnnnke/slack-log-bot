@@ -4,6 +4,7 @@ Public channels  → shared spreadsheet (anyone with link), tabs per channel
 Private channels → separate spreadsheet per channel, shared with members only
 """
 
+import hashlib
 import logging
 import math
 import re
@@ -94,6 +95,7 @@ LEGACY_LAYOUTS = [
 ]
 
 # Column indices (1-indexed)
+USERNAME_COLUMN = 2
 MESSAGE_COLUMN = 3
 ATTACHMENT_COLUMN = 4
 TS_COLUMN = 5
@@ -151,6 +153,32 @@ COLOR_HEADER_FG = {"red": 1.0, "green": 1.0, "blue": 1.0}         # white
 COLOR_THREAD_BG = {"red": 0.902, "green": 0.957, "blue": 0.918}   # #e6f4ea Light Green
 COLOR_TS_FG = {"red": 0.55, "green": 0.55, "blue": 0.55}          # #8C8C8C gray
 COLOR_LINK = {"red": 0.066, "green": 0.333, "blue": 0.8}          # #1155cc link blue
+COLOR_AUTHOR_RULE = {"red": 0.75, "green": 0.75, "blue": 0.75}    # #bfbfbf
+
+# Tints for the username cell, one per author. Greens are left out so a
+# coloured name is never mistaken for the green a thread reply sits on, and
+# every tint is pale enough to read black text against.
+USER_COLORS = [
+    {"red": 0.99, "green": 0.90, "blue": 0.91},   # red
+    {"red": 1.00, "green": 0.95, "blue": 0.88},   # orange
+    {"red": 1.00, "green": 0.99, "blue": 0.85},   # yellow
+    {"red": 0.93, "green": 0.91, "blue": 0.96},   # purple
+    {"red": 0.89, "green": 0.95, "blue": 0.99},   # blue
+    {"red": 0.99, "green": 0.89, "blue": 0.96},   # pink
+    {"red": 0.94, "green": 0.92, "blue": 0.90},   # brown
+    {"red": 0.92, "green": 0.94, "blue": 0.95},   # blue grey
+]
+
+
+def user_color(username: str) -> dict:
+    """A tint for this author, stable across runs and machines.
+
+    Hashed rather than assigned in order of appearance so the same person
+    keeps the same colour in every channel, and a new member needs no setup.
+    Python's hash() is salted per process, hence md5.
+    """
+    digest = hashlib.md5(username.encode("utf-8")).digest()
+    return USER_COLORS[digest[0] % len(USER_COLORS)]
 
 # Drive appProperty tying a spreadsheet to its Slack channel, so a rename
 # does not orphan the history under the old name.
@@ -191,6 +219,9 @@ class SheetsHandler:
         self._existing_ts: dict[str, set[str]] = {}
         self._channel_spreadsheets: dict[str, gspread.Spreadsheet] = {}
         self._index_entries: dict[str, str] = {}
+        # Last author written per channel, so a run of messages from one
+        # person is not ruled off in the middle when they arrive one by one.
+        self._last_author: dict[str, str] = {}
         self._formatted_sheets: set[str] = set()
         # Bolt dispatches events concurrently, and backfills run on their own
         # thread. Without this, two writers can interleave their read-then-append
@@ -467,6 +498,75 @@ class SheetsHandler:
                 _retry(spreadsheet.batch_update, {"requests": requests})
         except Exception as e:
             logger.warning(f"Failed to refresh reply counts: {e}")
+
+    def author_style_requests(
+        self, sheet_id: int, start_row: int, authors: list[str],
+        previous_author: str | None = None,
+    ) -> list[dict]:
+        """Colour each author's name cell, and rule off where the author changes.
+
+        The colour goes on the name cell alone: the row's own background is
+        already carrying whether the message is a thread reply.
+        """
+        requests = []
+
+        run_author = None
+        run_start = start_row
+        for offset, author in enumerate(authors + [None]):
+            if author != run_author:
+                if run_author is not None:
+                    requests.append({
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": run_start - 1,
+                                "endRowIndex": start_row + offset - 1,
+                                "startColumnIndex": USERNAME_COLUMN - 1,
+                                "endColumnIndex": USERNAME_COLUMN,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColor": user_color(run_author)
+                                }
+                            },
+                            "fields": "userEnteredFormat.backgroundColor",
+                        }
+                    })
+                run_author, run_start = author, start_row + offset
+
+        # A line above the first message of each new author, so a run of
+        # messages from one person reads as one block.
+        preceding = previous_author
+        for offset, author in enumerate(authors):
+            if preceding is not None and author != preceding:
+                requests.append({
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": start_row + offset - 1,
+                            "endRowIndex": start_row + offset,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": len(HEADER_ROW),
+                        },
+                        "top": {"style": "SOLID", "color": COLOR_AUTHOR_RULE},
+                    }
+                })
+            preceding = author
+        return requests
+
+    def apply_author_styles(
+        self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
+        start_row: int, authors: list[str], previous_author: str | None = None,
+    ):
+        requests = self.author_style_requests(
+            worksheet.id, start_row, authors, previous_author
+        )
+        if not requests:
+            return
+        try:
+            _retry(spreadsheet.batch_update, {"requests": requests})
+        except Exception as e:
+            logger.warning(f"Failed to style authors: {e}")
 
     def thread_group_requests(
         self, sheet_id: int, start_row: int, rows_data: list[dict]
@@ -850,11 +950,13 @@ class SheetsHandler:
     def _clear_cache_locked(self, channel_name: str | None = None):
         if channel_name:
             self._sheet_cache.pop(channel_name, None)
+            self._last_author.pop(channel_name, None)
             self._existing_ts.pop(channel_name, None)
             self._channel_spreadsheets.pop(channel_name, None)
             self._formatted_sheets.discard(channel_name)
         else:
             self._sheet_cache.clear()
+            self._last_author.clear()
             self._existing_ts.clear()
             self._channel_spreadsheets.clear()
             self._formatted_sheets.clear()
@@ -1021,6 +1123,11 @@ class SheetsHandler:
                 requests = self._row_height_requests(
                     worksheet.id, inserted_row, [text]
                 )
+                requests.extend(self.author_style_requests(
+                    worksheet.id, inserted_row, [f"@{username}"],
+                    self._last_author.get(channel_name),
+                ))
+                self._last_author[channel_name] = f"@{username}"
                 if attachments:
                     requests.append(self._attachment_cell_request(
                         worksheet.id, inserted_row, attachments
@@ -1189,6 +1296,13 @@ class SheetsHandler:
                     logger.warning(f"Failed to link attachment names: {e}")
             self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
             self.apply_thread_groups(worksheet, spreadsheet, start_row, ordered_msgs)
+            self.apply_author_styles(
+                worksheet, spreadsheet, start_row,
+                [f"@{m['username']}" for m in ordered_msgs],
+                self._last_author.get(channel_name),
+            )
+            if ordered_msgs:
+                self._last_author[channel_name] = f"@{ordered_msgs[-1]['username']}"
             self.sync_reply_counts(worksheet, spreadsheet)
         else:
             logger.warning(
