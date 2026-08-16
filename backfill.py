@@ -20,7 +20,6 @@ import config
 from google_sheets import SheetsHandler
 from google_drive import DriveHandler
 from slack_utils import (
-    build_permalink,
     get_member_emails,
     get_user_info,
     resolve_mentions,
@@ -115,7 +114,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
 
                 _, username, _ = get_user_info(client, user_id)
                 text = resolve_mentions(client, text)
-                permalink = build_permalink(client, ch_id, ts)
 
                 attachment_links = []
                 if ts not in known_ts:
@@ -133,7 +131,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                     "ts": ts,
                     "thread_ts": None,
                     "attachment_links": attachment_links,
-                    "permalink": permalink,
                 })
 
                 if msg.get("reply_count", 0) > 0:
@@ -156,7 +153,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
 
                             _, r_username, _ = get_user_info(client, r_user)
                             r_text = resolve_mentions(client, r_text)
-                            r_permalink = build_permalink(client, ch_id, r_ts, ts)
 
                             r_links = []
                             if r_ts not in known_ts:
@@ -174,7 +170,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                                 "ts": r_ts,
                                 "thread_ts": ts,
                                 "attachment_links": r_links,
-                                "permalink": r_permalink,
                             })
 
                     except Exception as e:

@@ -70,30 +70,38 @@ HEADER_ROW = [
     "ユーザー名",
     "メッセージ",
     "添付ファイル",
-    "パーマリンク",
     "メッセージTS",
     "スレッドTS",
 ]
 
-# The channel is the spreadsheet now, so a channel column would repeat one
-# value down every row, and the display name is a second spelling of the
-# username.
-LEGACY_HEADER_ROW = [
-    "日時", "チャンネル", "表示名", "ユーザー名",
-    "メッセージ", "添付ファイル", "パーマリンク", "メッセージTS", "スレッドTS",
+# Layouts written by earlier versions, each with the source index of every
+# column that survives into HEADER_ROW. Dropped along the way: the channel
+# (the spreadsheet is the channel), the display name (a second spelling of the
+# username), and the permalink — free-plan messages stop resolving after 90
+# days, which is exactly when this archive becomes the only copy, and the link
+# is a plain function of the workspace, channel and TS anyway.
+LEGACY_LAYOUTS = [
+    (
+        ["日時", "チャンネル", "表示名", "ユーザー名", "メッセージ",
+         "添付ファイル", "パーマリンク", "メッセージTS", "スレッドTS"],
+        [0, 3, 4, 5, 7, 8],
+    ),
+    (
+        ["日時", "ユーザー名", "メッセージ", "添付ファイル",
+         "パーマリンク", "メッセージTS", "スレッドTS"],
+        [0, 1, 2, 3, 5, 6],
+    ),
 ]
-# Which legacy columns survive, in the new order (0-indexed)
-LEGACY_COLUMN_MAP = [0, 3, 4, 5, 6, 7, 8]
 
 # Column indices (1-indexed)
 MESSAGE_COLUMN = 3
 ATTACHMENT_COLUMN = 4
-TS_COLUMN = 6
-THREAD_TS_COLUMN = 7
+TS_COLUMN = 5
+THREAD_TS_COLUMN = 6
 
-# Column widths (pixels). Total kept near 1100 so the sheet fits a laptop
+# Column widths (pixels). Total kept near 1000 so the sheet fits a laptop
 # screen without horizontal scrolling.
-COLUMN_WIDTHS = [130, 120, 450, 150, 80, 90, 90]
+COLUMN_WIDTHS = [130, 120, 450, 150, 90, 90]
 
 # Rows grew to fit their content, so one long message could take thirty lines
 # and push everything else off screen. Sheets has no maximum row height —
@@ -587,7 +595,6 @@ class SheetsHandler:
         ts: str,
         thread_ts: str | None,
         attachment_links: list[str],
-        permalink: str,
     ) -> list[str]:
         # Thread replies get a visual prefix
         is_reply = thread_ts and thread_ts != ts
@@ -598,7 +605,6 @@ class SheetsHandler:
             f"@{username}",
             display_text,
             "\n".join(attachment_links),
-            permalink,
             ts,
             thread_ts or "",
         ]
@@ -701,7 +707,6 @@ class SheetsHandler:
         ts: str,
         thread_ts: str | None,
         attachment_links: list[str],
-        permalink: str,
         member_emails: list[str] | None = None,
     ) -> bool:
         with self._lock:
@@ -713,7 +718,7 @@ class SheetsHandler:
                 return False
 
             row = self._build_row(
-                username, text, ts, thread_ts, attachment_links, permalink,
+                username, text, ts, thread_ts, attachment_links,
             )
 
             is_thread_reply = thread_ts and thread_ts != ts
@@ -860,7 +865,6 @@ class SheetsHandler:
                     ts=msg["ts"],
                     thread_ts=msg.get("thread_ts"),
                     attachment_links=msg.get("attachment_links", []),
-                    permalink=msg.get("permalink", ""),
                 )
                 rows.append(row)
                 ordered_msgs.append(msg)

@@ -29,8 +29,8 @@ import config
 from google_auth import load_credentials
 from google_sheets import (
     HEADER_ROW,
-    LEGACY_COLUMN_MAP,
-    LEGACY_HEADER_ROW,
+    LEGACY_LAYOUTS,
+    MESSAGE_COLUMN,
     SheetsHandler,
     _retry,
 )
@@ -46,35 +46,29 @@ PAUSE_BETWEEN_SHEETS = 1.5
 
 TS_PATTERN = re.compile(r"^\d{9,11}\.\d{4,8}$")
 
-LEGACY_TS_INDEX = LEGACY_HEADER_ROW.index("メッセージTS")   # 7
-NEW_TS_INDEX = HEADER_ROW.index("メッセージTS")             # 5
+CURRENT_TS_INDEX = HEADER_ROW.index("メッセージTS")
 
 
-def _is_legacy_row(padded: list[str]) -> bool:
-    """Whether a row is still in the 9-column layout.
+def _already_current(padded: list[str]) -> bool:
+    """Whether a row is already in the current layout.
 
-    A sheet can hold both: if the bot wrote while the migration was part way
-    through, its rows are already 7 columns. Mapping those as though they were
-    9 shifts every value along, so each row is judged on where its TS sits.
+    A sheet can hold both: a bot writing while the migration is part way
+    through leaves current-layout rows in an old-layout sheet, and mapping
+    those again shifts every value along. The TS column is the tell — no other
+    column holds something shaped like a Slack timestamp at that position.
     """
-    if TS_PATTERN.match(padded[LEGACY_TS_INDEX] or ""):
-        return True
-    if TS_PATTERN.match(padded[NEW_TS_INDEX] or ""):
-        return False
-    # No TS anywhere (a blank row): the layout does not matter, and the
-    # legacy mapping drops the two columns that a new-format row leaves empty.
-    return True
+    return bool(TS_PATTERN.match(padded[CURRENT_TS_INDEX] or ""))
 
 
-def convert(rows: list[list[str]]) -> list[list[str]]:
+def convert(rows: list[list[str]], column_map: list[int], width: int) -> list[list[str]]:
     """Keep only the surviving columns, padding rows that end early."""
     converted = []
     for row in rows:
-        padded = row + [""] * (len(LEGACY_HEADER_ROW) - len(row))
-        if _is_legacy_row(padded):
-            converted.append([padded[i] for i in LEGACY_COLUMN_MAP])
-        else:
+        padded = row + [""] * (max(width, len(HEADER_ROW)) - len(row))
+        if _already_current(padded):
             converted.append(padded[: len(HEADER_ROW)])
+        else:
+            converted.append([padded[i] for i in column_map])
     return converted
 
 
@@ -98,14 +92,25 @@ def find_targets(gc, drive) -> list[tuple]:
             continue
         spreadsheet = gc.open_by_key(meta["id"])
         for worksheet in _retry(spreadsheet.worksheets):
-            if worksheet.col_count < len(LEGACY_HEADER_ROW):
+            if worksheet.col_count < len(HEADER_ROW):
                 continue
             values = _retry(worksheet.get_all_values)
             header = values[0] if values else []
-            if header[: len(LEGACY_HEADER_ROW)] == LEGACY_HEADER_ROW:
-                targets.append((spreadsheet, worksheet, values))
-            elif header[: len(HEADER_ROW)] == HEADER_ROW:
+            if header[: len(HEADER_ROW)] == HEADER_ROW:
                 logger.info(f"  {meta['name']} / {worksheet.title}: 移行済み")
+                continue
+            for legacy_header, column_map in LEGACY_LAYOUTS:
+                if header[: len(legacy_header)] == legacy_header:
+                    targets.append(
+                        (spreadsheet, worksheet, values, column_map, len(legacy_header))
+                    )
+                    break
+            else:
+                if header:
+                    logger.warning(
+                        f"  ! {meta['name']} / {worksheet.title}: "
+                        f"見覚えのない列構成のため除外 ({header[:3]}...)"
+                    )
         time.sleep(PAUSE_BETWEEN_SHEETS)
     return targets
 
@@ -126,25 +131,32 @@ def main():
         return 0
 
     logger.info(f"\n移行対象: {len(targets)} タブ")
-    for spreadsheet, worksheet, values in targets:
-        logger.info(f"  {spreadsheet.title} / {worksheet.title} ({len(values) - 1} 行)")
+    for spreadsheet, worksheet, values, _map, width in targets:
+        logger.info(
+            f"  {spreadsheet.title} / {worksheet.title} "
+            f"({len(values) - 1} 行, {width}列 → {len(HEADER_ROW)}列)"
+        )
 
     if not args.apply:
         logger.info("\nこれは一覧表示のみです。実行するには --apply を付けてください。")
         return 0
 
     failed = 0
-    for spreadsheet, worksheet, old in targets:
+    for spreadsheet, worksheet, old, column_map, width in targets:
         logger.info(f"\n{spreadsheet.title} を移行中...")
         try:
-            new = convert(old)
+            new = convert(old, column_map, width)
             new[0] = list(HEADER_ROW)
 
             _retry(worksheet.clear, idempotent=False)
             _retry(worksheet.update, new, "A1", value_input_option="RAW", idempotent=False)
 
             handler._format_sheet(worksheet, spreadsheet)
-            # Thread replies lost their background when the sheet was cleared.
+            # Heights and thread backgrounds were lost when the sheet was cleared.
+            handler.apply_row_heights(
+                worksheet, spreadsheet, 2,
+                [row[MESSAGE_COLUMN - 1] for row in new[1:]],
+            )
             thread_rows = [{"thread_ts": row[len(HEADER_ROW) - 1]} for row in new[1:]]
             handler._format_thread_rows(worksheet, spreadsheet, 2, thread_rows)
 

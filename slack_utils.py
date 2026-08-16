@@ -16,8 +16,6 @@ _channel_info_cache: dict[str, dict] = {}
 _user_info_cache: dict[str, tuple[str, str, str]] = {}
 # Cache: channel_id -> (cached_at_monotonic, list of member emails)
 _member_emails_cache: dict[str, tuple[float, list[str]]] = {}
-# Workspace base URL (e.g. "https://myteam.slack.com"), resolved once via auth.test
-_team_url: str | None = None
 
 
 def install_retry_handlers(client):
@@ -77,36 +75,6 @@ def get_user_info(client, user_id: str) -> tuple[str, str, str]:
     except Exception as e:
         logger.error(f"Failed to resolve user {user_id}: {e}")
         return (user_id, user_id, "")
-
-
-def get_team_url(client) -> str:
-    """Return the workspace base URL (no trailing slash), e.g. https://myteam.slack.com."""
-    global _team_url
-    if _team_url is None:
-        try:
-            resp = client.auth_test()
-            _team_url = (resp.get("url") or "").rstrip("/")
-        except Exception as e:
-            logger.error(f"Failed to resolve workspace URL via auth.test: {e}")
-            _team_url = ""
-    return _team_url
-
-
-def build_permalink(
-    client, channel_id: str, ts: str, thread_ts: str | None = None
-) -> str:
-    """Build a message permalink locally instead of calling chat.getPermalink.
-
-    Permalinks are a pure function of (workspace URL, channel ID, ts), so calling
-    the API once per message just burns rate limit and makes backfills crawl.
-    """
-    base = get_team_url(client)
-    if not base or not ts:
-        return ""
-    link = f"{base}/archives/{channel_id}/p{ts.replace('.', '')}"
-    if thread_ts and thread_ts != ts:
-        link += f"?thread_ts={thread_ts}&cid={channel_id}"
-    return link
 
 
 def resolve_mentions(client, text: str) -> str:
