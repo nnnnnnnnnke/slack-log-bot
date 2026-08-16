@@ -23,6 +23,7 @@ from slack_utils import (
     build_permalink,
     get_member_emails,
     get_user_info,
+    resolve_mentions,
     install_retry_handlers,
 )
 
@@ -112,7 +113,8 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                 text = msg.get("text", "")
                 files = msg.get("files", [])
 
-                display_name, username, _ = get_user_info(client, user_id)
+                _, username, _ = get_user_info(client, user_id)
+                text = resolve_mentions(client, text)
                 permalink = build_permalink(client, ch_id, ts)
 
                 attachment_links = []
@@ -126,8 +128,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             attachment_links.append(link)
 
                 collected.append({
-                    "channel_name": ch_name,
-                    "display_name": display_name,
                     "username": username,
                     "text": text,
                     "ts": ts,
@@ -154,7 +154,8 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             r_text = reply.get("text", "")
                             r_files = reply.get("files", [])
 
-                            r_display, r_username, _ = get_user_info(client, r_user)
+                            _, r_username, _ = get_user_info(client, r_user)
+                            r_text = resolve_mentions(client, r_text)
                             r_permalink = build_permalink(client, ch_id, r_ts, ts)
 
                             r_links = []
@@ -168,8 +169,6 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                                         r_links.append(link)
 
                             collected.append({
-                                "channel_name": ch_name,
-                                "display_name": r_display,
                                 "username": r_username,
                                 "text": r_text,
                                 "ts": r_ts,

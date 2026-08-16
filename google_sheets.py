@@ -65,8 +65,6 @@ def _appended_row_number(response) -> int | None:
 
 HEADER_ROW = [
     "日時",
-    "チャンネル",
-    "表示名",
     "ユーザー名",
     "メッセージ",
     "添付ファイル",
@@ -75,13 +73,24 @@ HEADER_ROW = [
     "スレッドTS",
 ]
 
+# The channel is the spreadsheet now, so a channel column would repeat one
+# value down every row, and the display name is a second spelling of the
+# username.
+LEGACY_HEADER_ROW = [
+    "日時", "チャンネル", "表示名", "ユーザー名",
+    "メッセージ", "添付ファイル", "パーマリンク", "メッセージTS", "スレッドTS",
+]
+# Which legacy columns survive, in the new order (0-indexed)
+LEGACY_COLUMN_MAP = [0, 3, 4, 5, 6, 7, 8]
+
 # Column indices (1-indexed)
-ATTACHMENT_COLUMN = 6
-TS_COLUMN = 8
-THREAD_TS_COLUMN = 9
+MESSAGE_COLUMN = 3
+ATTACHMENT_COLUMN = 4
+TS_COLUMN = 6
+THREAD_TS_COLUMN = 7
 
 # Column widths (pixels)
-COLUMN_WIDTHS = [155, 100, 120, 120, 500, 200, 100, 140, 140]
+COLUMN_WIDTHS = [155, 140, 620, 200, 100, 140, 140]
 
 # Colors (RGB 0-1 float)
 COLOR_HEADER_BG = {"red": 0.118, "green": 0.557, "blue": 0.243}   # #1e8e3e Green
@@ -201,8 +210,8 @@ class SheetsHandler:
                 "range": {
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
-                    "startColumnIndex": 4,
-                    "endColumnIndex": 5,
+                    "startColumnIndex": MESSAGE_COLUMN - 1,
+                    "endColumnIndex": MESSAGE_COLUMN,
                 },
                 "cell": {
                     "userEnteredFormat": {
@@ -221,8 +230,8 @@ class SheetsHandler:
                 "range": {
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
-                    "startColumnIndex": 7,
-                    "endColumnIndex": 9,
+                    "startColumnIndex": TS_COLUMN - 1,
+                    "endColumnIndex": THREAD_TS_COLUMN,
                 },
                 "cell": {
                     "userEnteredFormat": {
@@ -243,7 +252,7 @@ class SheetsHandler:
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
                     "startColumnIndex": 0,
-                    "endColumnIndex": 4,
+                    "endColumnIndex": MESSAGE_COLUMN - 1,
                 },
                 "cell": {
                     "userEnteredFormat": {"verticalAlignment": "MIDDLE"}
@@ -492,8 +501,6 @@ class SheetsHandler:
 
     def _build_row(
         self,
-        channel_name: str,
-        display_name: str,
         username: str,
         text: str,
         ts: str,
@@ -507,8 +514,6 @@ class SheetsHandler:
 
         return [
             self._ts_to_datetime(ts),
-            channel_name,
-            display_name,
             f"@{username}",
             display_text,
             "\n".join(attachment_links),
@@ -610,7 +615,6 @@ class SheetsHandler:
     def insert_message(
         self,
         channel_name: str,
-        display_name: str,
         username: str,
         text: str,
         ts: str,
@@ -628,8 +632,7 @@ class SheetsHandler:
                 return False
 
             row = self._build_row(
-                channel_name, display_name, username, text,
-                ts, thread_ts, attachment_links, permalink,
+                username, text, ts, thread_ts, attachment_links, permalink,
             )
 
             is_thread_reply = thread_ts and thread_ts != ts
@@ -664,7 +667,7 @@ class SheetsHandler:
             existing.add(ts)
 
         logger.info(
-            f"Logged: #{channel_name} {display_name} (@{username}) ({self._ts_to_datetime(ts)})"
+            f"Logged: #{channel_name} @{username} ({self._ts_to_datetime(ts)})"
         )
         return True
 
@@ -758,8 +761,6 @@ class SheetsHandler:
         for _group_key, group_msgs in sorted_groups:
             for msg in group_msgs:
                 row = self._build_row(
-                    channel_name=msg["channel_name"],
-                    display_name=msg["display_name"],
                     username=msg["username"],
                     text=msg["text"],
                     ts=msg["ts"],

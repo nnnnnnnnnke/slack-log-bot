@@ -17,6 +17,7 @@ from slack_utils import (
     get_channel_info,
     get_member_emails,
     get_user_info,
+    resolve_mentions,
     install_retry_handlers,
     invalidate_members,
 )
@@ -68,14 +69,14 @@ def handle_message(event, client, logger):
     # The channel's sheet is shared with exactly this channel's members.
     member_emails = get_member_emails(client, channel_id)
 
-    display_name, username, _ = get_user_info(client, user_id)
+    _, username, _ = get_user_info(client, user_id)
+    text = resolve_mentions(client, text)
     permalink = build_permalink(client, channel_id, ts, thread_ts)
 
     # Log message immediately (without waiting for file uploads)
     try:
         sheets.insert_message(
             channel_name=channel_name,
-            display_name=display_name,
             username=username,
             text=text,
             ts=ts,
@@ -321,7 +322,8 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
             msg_text = msg.get("text", "")
             files = msg.get("files", [])
 
-            display_name, username, _ = get_user_info(client, user_id)
+            _, username, _ = get_user_info(client, user_id)
+            msg_text = resolve_mentions(client, msg_text)
             permalink = build_permalink(client, channel_id, ts)
 
             attachment_links = []
@@ -335,8 +337,6 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
                         attachment_links.append(link)
 
             collected.append({
-                "channel_name": channel_name,
-                "display_name": display_name,
                 "username": username,
                 "text": msg_text,
                 "ts": ts,
@@ -364,7 +364,8 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
                         r_text = reply.get("text", "")
                         r_files = reply.get("files", [])
 
-                        r_display, r_username, _ = get_user_info(client, r_user)
+                        _, r_username, _ = get_user_info(client, r_user)
+                        r_text = resolve_mentions(client, r_text)
                         r_permalink = build_permalink(client, channel_id, r_ts, ts)
 
                         r_links = []
@@ -378,8 +379,6 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
                                     r_links.append(link)
 
                         collected.append({
-                            "channel_name": channel_name,
-                            "display_name": r_display,
                             "username": r_username,
                             "text": r_text,
                             "ts": r_ts,
