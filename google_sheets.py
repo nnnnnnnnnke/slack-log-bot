@@ -89,8 +89,21 @@ ATTACHMENT_COLUMN = 4
 TS_COLUMN = 6
 THREAD_TS_COLUMN = 7
 
-# Column widths (pixels)
-COLUMN_WIDTHS = [155, 140, 620, 200, 100, 140, 140]
+# Column widths (pixels). Total kept near 1100 so the sheet fits a laptop
+# screen without horizontal scrolling.
+COLUMN_WIDTHS = [130, 120, 450, 150, 80, 90, 90]
+
+# A handful of long messages ran to 30-odd wrapped lines and pushed everything
+# else off screen, so data rows get a fixed height instead of growing to fit.
+#
+# Sheets has no maximum row height — pixelSize is exact — so this is a single
+# height for every row. Four lines suits the middle of the distribution (a
+# median message is about three lines at the message column's width) without
+# leaving the short ones surrounded by whitespace. Longer messages are clipped
+# visually only: the text is intact, and selecting the cell shows all of it in
+# the formula bar. Raise this if reading long messages in place matters more
+# than fitting more rows on screen.
+DATA_ROW_HEIGHT = 84
 
 # Colors (RGB 0-1 float)
 COLOR_HEADER_BG = {"red": 0.118, "green": 0.557, "blue": 0.243}   # #1e8e3e Green
@@ -261,7 +274,21 @@ class SheetsHandler:
             }
         })
 
-        # 8. Set basic filter (auto-filter) on header
+        # 8. Fixed height for data rows
+        requests.append({
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 1,
+                    "endIndex": max(worksheet.row_count, 2),
+                },
+                "properties": {"pixelSize": DATA_ROW_HEIGHT},
+                "fields": "pixelSize",
+            }
+        })
+
+        # 9. Set basic filter (auto-filter) on header
         requests.append({
             "setBasicFilter": {
                 "filter": {
