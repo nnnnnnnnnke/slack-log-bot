@@ -48,6 +48,7 @@ slack_log_bot/
 ├── migrate_to_per_channel.py     # 旧構成からの移行（共有シート→チャンネル別）
 ├── migrate_columns.py            # 旧構成からの移行（9列→7列）
 ├── cleanup_duplicate_files.py    # 重複した添付ファイルの掃除
+├── relink_attachments.py         # 既存の添付セルをファイル名リンクに変換
 ├── config.py             # 環境変数の読み込み
 ├── setup.py              # セットアップウィザード（対話式）
 ├── slack-app-manifest.yml # Slack Appマニフェスト（貼るだけでApp設定完了）
@@ -121,7 +122,7 @@ Google アカウントにのみ共有されます。
 |--------|------|
 | ユーザー名 | @メンション名（例: @tanaka.taro） |
 | メッセージ | 投稿本文。スレッド返信には先頭に `└ ` が付く。`<@U012ABC>` のようなメンションは `@name` に、`<#C012ABC>` は `#channel` に展開される |
-| 添付ファイル | Google Driveへのリンク（複数ある場合は改行区切り） |
+| 添付ファイル | ファイル名がGoogle Driveへのリンクになっている（複数ある場合は改行区切り） |
 | メッセージTS | Slack固有のタイムスタンプID（重複判定に使用） |
 
 > **チャンネル名**の列はありません。1チャンネル=1スプレッドシートなので、全行に同じ値が並ぶだけです。

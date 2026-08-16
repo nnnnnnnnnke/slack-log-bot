@@ -199,8 +199,8 @@ class DriveHandler:
         mime_type: str,
         channel_name: str,
         member_emails: list[str] | None = None,
-    ) -> str:
-        """Upload a file to the channel's folder and return its shareable link."""
+    ) -> tuple[str, str]:
+        """Upload a file to the channel's folder. Returns (file name, link)."""
         folder_id = self._get_or_create_channel_folder(channel_name, member_emails)
 
         file_metadata = {
@@ -220,7 +220,7 @@ class DriveHandler:
         # again would double the Drive calls for no added access.
 
         logger.info(f"Uploaded to Drive: #{channel_name}/{file_name} -> {uploaded['webViewLink']}")
-        return uploaded["webViewLink"]
+        return (file_name, uploaded["webViewLink"])
 
     def download_from_slack_and_upload(
         self,
@@ -228,10 +228,12 @@ class DriveHandler:
         slack_token: str,
         channel_name: str,
         member_emails: list[str] | None = None,
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
         """Download a file from Slack and upload it to Google Drive.
 
-        Returns the Drive link or None if failed.
+        Returns (file name, Drive link), or None if it could not be stored.
+        The name travels with the link so the sheet can show the filename with
+        the URL behind it.
         """
         file_size = file_info.get("size", 0)
         if file_size > config.MAX_FILE_SIZE:

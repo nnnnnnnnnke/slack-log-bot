@@ -79,7 +79,7 @@ def handle_message(event, client, logger):
             text=text,
             ts=ts,
             thread_ts=thread_ts,
-            attachment_links=[],
+            attachments=[],
             member_emails=member_emails,
         )
     except Exception as e:
@@ -322,7 +322,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
             _, username, _ = get_user_info(client, user_id)
             msg_text = resolve_mentions(client, msg_text)
 
-            attachment_links = []
+            attachments = []
             if ts not in known_ts:
                 for f in files:
                     link = drive.download_from_slack_and_upload(
@@ -330,14 +330,14 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
                         member_emails,
                     )
                     if link:
-                        attachment_links.append(link)
+                        attachments.append(link)
 
             collected.append({
                 "username": username,
                 "text": msg_text,
                 "ts": ts,
                 "thread_ts": None,
-                "attachment_links": attachment_links,
+                "attachments": attachments,
             })
 
             # Fetch thread replies
@@ -362,7 +362,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
                         _, r_username, _ = get_user_info(client, r_user)
                         r_text = resolve_mentions(client, r_text)
 
-                        r_links = []
+                        r_attachments = []
                         if r_ts not in known_ts:
                             for f in r_files:
                                 link = drive.download_from_slack_and_upload(
@@ -370,14 +370,14 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
                                     member_emails,
                                 )
                                 if link:
-                                    r_links.append(link)
+                                    r_attachments.append(link)
 
                         collected.append({
                             "username": r_username,
                             "text": r_text,
                             "ts": r_ts,
                             "thread_ts": ts,
-                            "attachment_links": r_links,
+                            "attachments": r_attachments,
                         })
 
                 except Exception as e:

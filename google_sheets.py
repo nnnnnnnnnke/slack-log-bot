@@ -150,6 +150,7 @@ COLOR_HEADER_BG = {"red": 0.118, "green": 0.557, "blue": 0.243}   # #1e8e3e Gree
 COLOR_HEADER_FG = {"red": 1.0, "green": 1.0, "blue": 1.0}         # white
 COLOR_THREAD_BG = {"red": 0.902, "green": 0.957, "blue": 0.918}   # #e6f4ea Light Green
 COLOR_TS_FG = {"red": 0.55, "green": 0.55, "blue": 0.55}          # #8C8C8C gray
+COLOR_LINK = {"red": 0.066, "green": 0.333, "blue": 0.8}          # #1155cc link blue
 
 JST = timezone(timedelta(hours=9))
 
@@ -422,6 +423,50 @@ class SheetsHandler:
                 logger.warning(f"Failed to format thread rows: {e}")
 
     @staticmethod
+    def _attachment_cell_request(
+        sheet_id: int, row_number: int, attachments: list[tuple[str, str]]
+    ) -> dict:
+        """Write the attachment cell as linked file names rather than raw URLs.
+
+        A Drive URL is 60-odd unreadable characters; the file name says what it
+        is. Rich text is used instead of a HYPERLINK formula because a formula
+        yields one link per cell, and a message can carry several files.
+        """
+        text = "\n".join(name for name, _ in attachments)
+        runs = []
+        position = 0
+        for name, url in attachments:
+            runs.append({
+                "startIndex": position,
+                "format": {
+                    "link": {"uri": url},
+                    "underline": True,
+                    "foregroundColor": COLOR_LINK,
+                },
+            })
+            position += len(name)
+            # The separating newline carries no link, so the run has to end.
+            runs.append({"startIndex": position, "format": {}})
+            position += 1
+
+        return {
+            "updateCells": {
+                "rows": [{
+                    "values": [{
+                        "userEnteredValue": {"stringValue": text},
+                        "textFormatRuns": runs[:-1],   # drop the trailing reset
+                    }]
+                }],
+                "fields": "userEnteredValue,textFormatRuns",
+                "start": {
+                    "sheetId": sheet_id,
+                    "rowIndex": row_number - 1,
+                    "columnIndex": ATTACHMENT_COLUMN - 1,
+                },
+            }
+        }
+
+    @staticmethod
     def _thread_background_request(sheet_id: int, row_number: int) -> dict:
         """Thread reply background for one row."""
         return {
@@ -594,7 +639,7 @@ class SheetsHandler:
         text: str,
         ts: str,
         thread_ts: str | None,
-        attachment_links: list[str],
+        attachments: list[tuple[str, str]],
     ) -> list[str]:
         # Thread replies get a visual prefix
         is_reply = thread_ts and thread_ts != ts
@@ -604,7 +649,7 @@ class SheetsHandler:
             self._ts_to_datetime(ts),
             f"@{username}",
             display_text,
-            "\n".join(attachment_links),
+            "\n".join(name for name, _ in attachments),
             ts,
             thread_ts or "",
         ]
@@ -706,7 +751,7 @@ class SheetsHandler:
         text: str,
         ts: str,
         thread_ts: str | None,
-        attachment_links: list[str],
+        attachments: list[tuple[str, str]],
         member_emails: list[str] | None = None,
     ) -> bool:
         with self._lock:
@@ -718,7 +763,7 @@ class SheetsHandler:
                 return False
 
             row = self._build_row(
-                username, text, ts, thread_ts, attachment_links,
+                username, text, ts, thread_ts, attachments,
             )
 
             is_thread_reply = thread_ts and thread_ts != ts
@@ -754,6 +799,10 @@ class SheetsHandler:
                 requests = self._row_height_requests(
                     worksheet.id, inserted_row, [text]
                 )
+                if attachments:
+                    requests.append(self._attachment_cell_request(
+                        worksheet.id, inserted_row, attachments
+                    ))
                 if is_thread_reply:
                     requests.append(
                         self._thread_background_request(worksheet.id, inserted_row)
@@ -771,23 +820,25 @@ class SheetsHandler:
         return True
 
     def update_attachment_links(
-        self, channel_name: str, ts: str, attachment_links: list[str],
+        self, channel_name: str, ts: str, attachments: list[tuple[str, str]],
         member_emails: list[str] | None = None,
     ):
-        """Update the attachment column for a message identified by TS."""
-        if not attachment_links:
+        """Fill in the attachment cell once the background uploads finish."""
+        if not attachments:
             return
         try:
             with self._lock:
                 worksheet = self._get_worksheet(channel_name, member_emails)
                 ts_values = _retry(worksheet.col_values, TS_COLUMN)
+                spreadsheet = self._get_spreadsheet(channel_name)
                 for i, val in enumerate(ts_values):
                     if val == ts:
                         row_num = i + 1  # 1-indexed
-                        _retry(
-                            worksheet.update_cell, row_num, ATTACHMENT_COLUMN,
-                            "\n".join(attachment_links),
-                        )
+                        _retry(spreadsheet.batch_update, {"requests": [
+                            self._attachment_cell_request(
+                                worksheet.id, row_num, attachments
+                            )
+                        ]})
                         logger.info(f"Updated attachments for ts={ts} in #{channel_name}")
                         return
             logger.warning(f"No row found for ts={ts} in #{channel_name}, attachments not linked")
@@ -864,7 +915,7 @@ class SheetsHandler:
                     text=msg["text"],
                     ts=msg["ts"],
                     thread_ts=msg.get("thread_ts"),
-                    attachment_links=msg.get("attachment_links", []),
+                    attachments=msg.get("attachments", []),
                 )
                 rows.append(row)
                 ordered_msgs.append(msg)
@@ -883,6 +934,18 @@ class SheetsHandler:
                 worksheet, spreadsheet, start_row,
                 [m.get("text", "") for m in ordered_msgs],
             )
+            attachment_requests = [
+                self._attachment_cell_request(
+                    worksheet.id, start_row + i, msg["attachments"]
+                )
+                for i, msg in enumerate(ordered_msgs)
+                if msg.get("attachments")
+            ]
+            if attachment_requests:
+                try:
+                    _retry(spreadsheet.batch_update, {"requests": attachment_requests})
+                except Exception as e:
+                    logger.warning(f"Failed to link attachment names: {e}")
             self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
         else:
             logger.warning(

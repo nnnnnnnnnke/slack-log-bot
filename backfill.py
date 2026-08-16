@@ -115,7 +115,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                 _, username, _ = get_user_info(client, user_id)
                 text = resolve_mentions(client, text)
 
-                attachment_links = []
+                attachments = []
                 if ts not in known_ts:
                     for f in files:
                         link = drive.download_from_slack_and_upload(
@@ -123,14 +123,14 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             member_emails,
                         )
                         if link:
-                            attachment_links.append(link)
+                            attachments.append(link)
 
                 collected.append({
                     "username": username,
                     "text": text,
                     "ts": ts,
                     "thread_ts": None,
-                    "attachment_links": attachment_links,
+                    "attachments": attachments,
                 })
 
                 if msg.get("reply_count", 0) > 0:
@@ -154,7 +154,7 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                             _, r_username, _ = get_user_info(client, r_user)
                             r_text = resolve_mentions(client, r_text)
 
-                            r_links = []
+                            r_attachments = []
                             if r_ts not in known_ts:
                                 for f in r_files:
                                     link = drive.download_from_slack_and_upload(
@@ -162,14 +162,14 @@ def backfill(channel_filter: str | None = None, days: int = 90):
                                         member_emails,
                                     )
                                     if link:
-                                        r_links.append(link)
+                                        r_attachments.append(link)
 
                             collected.append({
                                 "username": r_username,
                                 "text": r_text,
                                 "ts": r_ts,
                                 "thread_ts": ts,
-                                "attachment_links": r_links,
+                                "attachments": r_attachments,
                             })
 
                     except Exception as e:
