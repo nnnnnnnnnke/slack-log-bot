@@ -12,6 +12,12 @@ from google_auth import load_credentials
 
 logger = logging.getLogger(__name__)
 
+FOLDER_MIME = "application/vnd.google-apps.folder"
+
+# Channel folders live under this, so the root folder shows the spreadsheets
+# rather than one folder per channel mixed in among them.
+ATTACHMENTS_FOLDER_NAME = "添付ファイル"
+
 
 class DriveHandler:
     def __init__(self):
@@ -19,6 +25,7 @@ class DriveHandler:
         self.root_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
         # Cache: channel_name -> folder_id
         self._channel_folders: dict[str, str] = {}
+        self._attachments_root: str | None = None
 
     def _share_with_anyone(self, file_id: str):
         """Make a file/folder readable by anyone with the link."""
@@ -39,46 +46,82 @@ class DriveHandler:
             except Exception as e:
                 logger.warning(f"Failed to share with {email}: {e}")
 
-    def _get_or_create_channel_folder(
-        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None
-    ) -> str:
-        """Get or create a subfolder for the channel under the root folder."""
-        if channel_name in self._channel_folders:
-            return self._channel_folders[channel_name]
-
-        # Search for existing folder
+    def _find_folder(self, name: str, parent: str) -> str | None:
         query = (
-            f"name = '#{channel_name}' and "
-            f"'{self.root_folder_id}' in parents and "
-            f"mimeType = 'application/vnd.google-apps.folder' and "
-            f"trashed = false"
+            f"name = '{name}' and '{parent}' in parents and "
+            f"mimeType = '{FOLDER_MIME}' and trashed = false"
         )
         results = self.service.files().list(
             q=query, fields="files(id, name)", pageSize=1
         ).execute()
         files = results.get("files", [])
+        return files[0]["id"] if files else None
 
-        if files:
-            folder_id = files[0]["id"]
-        else:
-            # Create new folder
-            folder_metadata = {
-                "name": f"#{channel_name}",
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [self.root_folder_id],
-            }
+    def _get_attachments_root(self) -> str:
+        """The folder that holds the per-channel folders."""
+        if self._attachments_root:
+            return self._attachments_root
+
+        folder_id = self._find_folder(ATTACHMENTS_FOLDER_NAME, self.root_folder_id)
+        if not folder_id:
+            created = self.service.files().create(
+                body={
+                    "name": ATTACHMENTS_FOLDER_NAME,
+                    "mimeType": FOLDER_MIME,
+                    "parents": [self.root_folder_id],
+                },
+                fields="id",
+            ).execute()
+            folder_id = created["id"]
+            logger.info(f"Created attachments folder: {ATTACHMENTS_FOLDER_NAME}")
+
+        self._attachments_root = folder_id
+        return folder_id
+
+    def _get_or_create_channel_folder(
+        self, channel_name: str, is_private: bool = False, member_emails: list[str] | None = None
+    ) -> str:
+        """Get or create the channel's folder under the attachments folder."""
+        if channel_name in self._channel_folders:
+            return self._channel_folders[channel_name]
+
+        attachments_root = self._get_attachments_root()
+        folder_name = f"#{channel_name}"
+        folder_id = self._find_folder(folder_name, attachments_root)
+
+        if not folder_id:
+            # Channel folders used to sit directly under the root folder. Adopt
+            # one if it is still there, so uploads keep landing in the folder
+            # that already holds this channel's files.
+            legacy_id = self._find_folder(folder_name, self.root_folder_id)
+            if legacy_id:
+                self.service.files().update(
+                    fileId=legacy_id,
+                    addParents=attachments_root,
+                    removeParents=self.root_folder_id,
+                    fields="id",
+                ).execute()
+                folder_id = legacy_id
+                logger.info(f"Moved {folder_name} under {ATTACHMENTS_FOLDER_NAME}")
+
+        if not folder_id:
             folder = self.service.files().create(
-                body=folder_metadata, fields="id"
+                body={
+                    "name": folder_name,
+                    "mimeType": FOLDER_MIME,
+                    "parents": [attachments_root],
+                },
+                fields="id",
             ).execute()
             folder_id = folder["id"]
 
             # Set permissions based on channel type
             if is_private and member_emails:
                 self._share_with_emails(folder_id, member_emails)
-                logger.info(f"Created private Drive folder: #{channel_name} (shared with {len(member_emails)} members)")
+                logger.info(f"Created private Drive folder: {folder_name} (shared with {len(member_emails)} members)")
             else:
                 self._share_with_anyone(folder_id)
-                logger.info(f"Created public Drive folder: #{channel_name}")
+                logger.info(f"Created public Drive folder: {folder_name}")
 
         self._channel_folders[channel_name] = folder_id
         return folder_id

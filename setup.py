@@ -27,9 +27,14 @@ ENV_FILE = ".env"
 ENV_EXAMPLE = ".env.example"
 
 # One folder holds everything the bot owns: the shared spreadsheet, the
-# per-private-channel spreadsheets, and the per-channel attachment folders.
+# per-private-channel spreadsheets, and the attachments folder.
 DRIVE_FOLDER_NAME = "Slack ログ"
 SPREADSHEET_NAME = "Slack ログ - パブリックチャンネル"
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+# Must match google_drive.ATTACHMENTS_FOLDER_NAME (declared here too so this
+# wizard does not have to import config before .env is complete)
+ATTACHMENTS_FOLDER_NAME = "添付ファイル"
 
 # Scopes the bot needs; must stay in sync with slack-app-manifest.yml
 REQUIRED_SLACK_SCOPES = [
@@ -309,6 +314,43 @@ def move_into_folder(drive, file_id: str, folder_id: str) -> bool:
     return True
 
 
+def organise_attachment_folders(drive, root_folder_id: str) -> int:
+    """Gather the per-channel folders under one attachments folder.
+
+    Returns how many were moved. Folder ids are unchanged by a move, so the
+    Drive links already recorded in the spreadsheets keep working.
+    """
+    loose = [
+        f
+        for f in drive.files().list(
+            q=f"'{root_folder_id}' in parents and mimeType = '{FOLDER_MIME}' "
+            f"and trashed = false",
+            fields="files(id, name)",
+            pageSize=1000,
+        ).execute().get("files", [])
+        if f["name"].startswith("#")
+    ]
+    if not loose:
+        return 0
+
+    attachments_id, _ = find_or_create(
+        drive, ATTACHMENTS_FOLDER_NAME, FOLDER_MIME, parent=root_folder_id
+    )
+    moved = 0
+    for folder in loose:
+        try:
+            drive.files().update(
+                fileId=folder["id"],
+                addParents=attachments_id,
+                removeParents=root_folder_id,
+                fields="id",
+            ).execute()
+            moved += 1
+        except Exception as e:
+            warn(f"{folder['name']} を移動できませんでした: {e}")
+    return moved
+
+
 def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
     import gspread
     from googleapiclient.discovery import build
@@ -362,6 +404,13 @@ def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
             ok("説明タブは作成済み")
     except Exception as e:
         warn(f"説明タブを作成できませんでした: {e}")
+
+    try:
+        moved = organise_attachment_folders(drive, folder_id)
+        if moved:
+            ok(f"添付フォルダ {moved} 件を「{ATTACHMENTS_FOLDER_NAME}」にまとめました")
+    except Exception as e:
+        warn(f"添付フォルダを整理できませんでした: {e}")
 
     return env
 
