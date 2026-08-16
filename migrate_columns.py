@@ -8,6 +8,9 @@ This has to run before the bot writes again: dedup and thread placement read
 the message TS by column number, and in the old layout that number points at a
 different column.
 
+Safe to re-run — sheets already converted are skipped — so a run that stops
+part way can simply be started again.
+
 Usage:
     python migrate_columns.py            # 対象を表示するだけ
     python migrate_columns.py --apply    # 実際に書き換える
@@ -15,7 +18,9 @@ Usage:
 
 import argparse
 import logging
+import re
 import sys
+import time
 
 import gspread
 from googleapiclient.discovery import build
@@ -27,10 +32,38 @@ from google_sheets import (
     LEGACY_COLUMN_MAP,
     LEGACY_HEADER_ROW,
     SheetsHandler,
+    _retry,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
+
+# Sheets allows 60 reads/minute/user, and this walks every tab of every
+# spreadsheet. _retry backs off when the limit is hit anyway; pausing between
+# spreadsheets keeps it from getting there in the first place.
+PAUSE_BETWEEN_SHEETS = 1.5
+
+
+TS_PATTERN = re.compile(r"^\d{9,11}\.\d{4,8}$")
+
+LEGACY_TS_INDEX = LEGACY_HEADER_ROW.index("メッセージTS")   # 7
+NEW_TS_INDEX = HEADER_ROW.index("メッセージTS")             # 5
+
+
+def _is_legacy_row(padded: list[str]) -> bool:
+    """Whether a row is still in the 9-column layout.
+
+    A sheet can hold both: if the bot wrote while the migration was part way
+    through, its rows are already 7 columns. Mapping those as though they were
+    9 shifts every value along, so each row is judged on where its TS sits.
+    """
+    if TS_PATTERN.match(padded[LEGACY_TS_INDEX] or ""):
+        return True
+    if TS_PATTERN.match(padded[NEW_TS_INDEX] or ""):
+        return False
+    # No TS anywhere (a blank row): the layout does not matter, and the
+    # legacy mapping drops the two columns that a new-format row leaves empty.
+    return True
 
 
 def convert(rows: list[list[str]]) -> list[list[str]]:
@@ -38,20 +71,19 @@ def convert(rows: list[list[str]]) -> list[list[str]]:
     converted = []
     for row in rows:
         padded = row + [""] * (len(LEGACY_HEADER_ROW) - len(row))
-        converted.append([padded[i] for i in LEGACY_COLUMN_MAP])
+        if _is_legacy_row(padded):
+            converted.append([padded[i] for i in LEGACY_COLUMN_MAP])
+        else:
+            converted.append(padded[: len(HEADER_ROW)])
     return converted
 
 
-def main():
-    parser = argparse.ArgumentParser(description="シートを新しい列構成へ移行")
-    parser.add_argument("--apply", action="store_true", help="実際に書き換える")
-    args = parser.parse_args()
+def find_targets(gc, drive) -> list[tuple]:
+    """Tabs still on the old layout, with their contents already read.
 
-    creds = load_credentials()
-    gc = gspread.authorize(creds)
-    drive = build("drive", "v3", credentials=creds)
-    handler = SheetsHandler()
-
+    Values are kept from this pass so the conversion does not read them again;
+    at 60 reads a minute, reading everything twice is what trips the limit.
+    """
     query = (
         f"'{config.GOOGLE_DRIVE_FOLDER_ID}' in parents and "
         f"mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
@@ -65,52 +97,69 @@ def main():
         if not meta["name"].startswith("Slack Log - #"):
             continue
         spreadsheet = gc.open_by_key(meta["id"])
-        for worksheet in spreadsheet.worksheets():
+        for worksheet in _retry(spreadsheet.worksheets):
             if worksheet.col_count < len(LEGACY_HEADER_ROW):
                 continue
-            header = worksheet.row_values(1)
+            values = _retry(worksheet.get_all_values)
+            header = values[0] if values else []
             if header[: len(LEGACY_HEADER_ROW)] == LEGACY_HEADER_ROW:
-                targets.append((spreadsheet, worksheet))
+                targets.append((spreadsheet, worksheet, values))
             elif header[: len(HEADER_ROW)] == HEADER_ROW:
                 logger.info(f"  {meta['name']} / {worksheet.title}: 移行済み")
+        time.sleep(PAUSE_BETWEEN_SHEETS)
+    return targets
 
+
+def main():
+    parser = argparse.ArgumentParser(description="シートを新しい列構成へ移行")
+    parser.add_argument("--apply", action="store_true", help="実際に書き換える")
+    args = parser.parse_args()
+
+    creds = load_credentials()
+    gc = gspread.authorize(creds)
+    drive = build("drive", "v3", credentials=creds)
+    handler = SheetsHandler()
+
+    targets = find_targets(gc, drive)
     if not targets:
         logger.info("移行が必要なシートはありません。")
         return 0
 
     logger.info(f"\n移行対象: {len(targets)} タブ")
-    for spreadsheet, worksheet in targets:
-        rows = len(worksheet.col_values(1)) - 1
-        logger.info(f"  {spreadsheet.title} / {worksheet.title} ({rows} 行)")
+    for spreadsheet, worksheet, values in targets:
+        logger.info(f"  {spreadsheet.title} / {worksheet.title} ({len(values) - 1} 行)")
 
     if not args.apply:
         logger.info("\nこれは一覧表示のみです。実行するには --apply を付けてください。")
         return 0
 
-    for spreadsheet, worksheet in targets:
+    failed = 0
+    for spreadsheet, worksheet, old in targets:
         logger.info(f"\n{spreadsheet.title} を移行中...")
-        old = worksheet.get_all_values()
-        new = convert(old)
-        new[0] = list(HEADER_ROW)
+        try:
+            new = convert(old)
+            new[0] = list(HEADER_ROW)
 
-        if len(new) != len(old):
-            logger.error("  ! 行数が変わりました。中断します。")
-            continue
+            _retry(worksheet.clear, idempotent=False)
+            _retry(worksheet.update, new, "A1", value_input_option="RAW", idempotent=False)
 
-        worksheet.clear()
-        worksheet.update(new, "A1", value_input_option="RAW")
+            handler._format_sheet(worksheet, spreadsheet)
+            # Thread replies lost their background when the sheet was cleared.
+            thread_rows = [{"thread_ts": row[len(HEADER_ROW) - 1]} for row in new[1:]]
+            handler._format_thread_rows(worksheet, spreadsheet, 2, thread_rows)
 
-        handler._format_sheet(worksheet, spreadsheet)
-        # Thread replies lost their background when the sheet was cleared.
-        thread_rows = [
-            {"thread_ts": row[len(HEADER_ROW) - 1]} for row in new[1:]
-        ]
-        handler._format_thread_rows(worksheet, spreadsheet, 2, thread_rows)
-
-        logger.info(f"  {len(new) - 1} 行を {len(HEADER_ROW)} 列に変換しました")
+            logger.info(f"  {len(new) - 1} 行を {len(HEADER_ROW)} 列に変換しました")
+        except Exception as e:
+            failed += 1
+            logger.error(f"  ! 失敗: {e}")
+            logger.error("    このタブは元のままです。再実行してください。")
+        time.sleep(PAUSE_BETWEEN_SHEETS)
 
     logger.info(f"\n{'─' * 50}")
-    logger.info(f"移行完了: {len(targets)} タブ")
+    logger.info(f"移行完了: {len(targets) - failed} / {len(targets)} タブ")
+    if failed:
+        logger.warning("失敗したタブがあります。少し待ってから再実行してください。")
+        return 1
     return 0
 
 
