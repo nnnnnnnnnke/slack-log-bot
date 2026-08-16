@@ -431,6 +431,11 @@ class SheetsHandler:
         A Drive URL is 60-odd unreadable characters; the file name says what it
         is. Rich text is used instead of a HYPERLINK formula because a formula
         yields one link per cell, and a message can carry several files.
+
+        With a single attachment Sheets folds the one run, which spans the
+        whole string, into the cell's own textFormat and reports no runs at
+        all. The link works either way — worth knowing before concluding from
+        an empty textFormatRuns that the link failed to apply.
         """
         text = "\n".join(name for name, _ in attachments)
         runs = []
