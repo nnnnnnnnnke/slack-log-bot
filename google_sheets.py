@@ -15,6 +15,7 @@ from googleapiclient.discovery import build
 
 import config
 from google_auth import load_credentials
+from sheet_guide import ensure_guide_sheet
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,14 @@ class SheetsHandler:
         # thread. Without this, two writers can interleave their read-then-append
         # and duplicate rows or clobber each other's insert positions.
         self._lock = threading.RLock()
+
+        # Covers spreadsheets created before the guide existed. It is skipped
+        # once present, and must never stop the bot from starting.
+        try:
+            if ensure_guide_sheet(self.public_spreadsheet):
+                logger.info("Created guide sheet in the shared spreadsheet")
+        except Exception as e:
+            logger.warning(f"Could not create guide sheet: {e}")
 
     # ── Sheet formatting ──
 

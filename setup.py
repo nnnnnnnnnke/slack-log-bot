@@ -293,7 +293,10 @@ def find_or_create(drive, name: str, mime_type: str, parent: str | None = None) 
 
 
 def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
+    import gspread
     from googleapiclient.discovery import build
+
+    from sheet_guide import ensure_guide_sheet
 
     step(3, "スプレッドシートと Drive フォルダの準備")
 
@@ -309,6 +312,16 @@ def provision_google_resources(env: dict[str, str]) -> dict[str, str]:
         env["GOOGLE_SPREADSHEET_ID"] = ss_id
         ok(f"スプレッドシートを{'作成' if created else '検出'}: {SPREADSHEET_NAME}")
         print(f"      https://docs.google.com/spreadsheets/d/{ss_id}/edit")
+
+    # Google leaves an empty default sheet behind; make it the guide.
+    try:
+        spreadsheet = gspread.authorize(creds).open_by_key(env["GOOGLE_SPREADSHEET_ID"])
+        if ensure_guide_sheet(spreadsheet):
+            ok("説明タブ「📖 このシートについて」を作成")
+        else:
+            ok("説明タブは作成済み")
+    except Exception as e:
+        warn(f"説明タブを作成できませんでした: {e}")
 
     if env.get("GOOGLE_DRIVE_FOLDER_ID"):
         ok(f"既存の Drive フォルダを使用: {env['GOOGLE_DRIVE_FOLDER_ID']}")
