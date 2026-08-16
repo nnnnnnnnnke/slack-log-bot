@@ -216,17 +216,24 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 2. 以下の2つのAPIを有効化:
    - **Google Sheets API** — [有効化リンク](https://console.cloud.google.com/apis/library/sheets.googleapis.com)
    - **Google Drive API** — [有効化リンク](https://console.cloud.google.com/apis/library/drive.googleapis.com)
-3. **「APIとサービス」→「認証情報」→「認証情報を作成」→「OAuth クライアントID」**
+3. **OAuth同意画面**（[Google Auth Platform](https://console.cloud.google.com/auth/overview)）を設定
+   - ユーザーの種類: **外部**
+   - アプリ名・ユーザーサポートメール・デベロッパー連絡先を入力
+4. **[対象](https://console.cloud.google.com/auth/audience) → 「アプリを公開」** を実行し、公開ステータスを **「本番環境」** にする
+5. **[認証情報](https://console.cloud.google.com/apis/credentials) → 「認証情報を作成」→「OAuth クライアント ID」**
    - アプリケーションの種類: **デスクトップアプリ**
    - 作成後、JSONをダウンロードして `client_secret.json` としてプロジェクトに配置
 
-> **OAuth同意画面**: 初回は先に同意画面の設定が必要です。
-> 「外部」を選び、テストユーザーに自分のGmailアドレスを追加してください。
-
 > [!IMPORTANT]
-> 同意画面を **「テスト中」のままにすると、Googleの仕様でリフレッシュトークンが7日で失効します。**
-> 継続運用する場合は、動作確認後に同意画面を **「本番環境」** に切り替えてください。
-> 未審査のままでも動作しますが、認証時に「このアプリは確認されていません」の警告が表示されます。
+> **手順4（本番環境への切り替え）を飛ばさないでください。**
+>
+> 「テスト中」のままだと、次の2つが起きます:
+> - テストユーザーに自分を追加していないと、認証時に **`エラー 403: access_denied`** で弾かれる
+> - 追加して通した場合も、Googleの仕様で **リフレッシュトークンが7日で失効**し、1週間後に突然動かなくなる
+>
+> 未審査のまま公開しても問題なく動作します（100ユーザーまでの制限付き）。
+> 認証時に「このアプリは Google で確認されていません」と警告が出ますが、
+> **「詳細」→「（アプリ名）に移動」** で進めてください。
 
 ---
 
@@ -422,6 +429,12 @@ python backfill.py --days 30
 ---
 
 ## トラブルシューティング
+
+### `エラー 403: access_denied` /「Google の審査プロセスを完了していません」
+
+OAuth同意画面が **「テスト中」** で、自分がテストユーザーに入っていない状態です。
+[対象](https://console.cloud.google.com/auth/audience) の画面で **「アプリを公開」** を実行してください
+（テストユーザーに自分を追加しても通りますが、その場合トークンが7日で失効します）。
 
 ### 1週間ほど動いた後に突然 Google 認証が失敗する
 

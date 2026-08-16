@@ -253,8 +253,22 @@ def run_google_auth(reauth: bool = False):
         fail(f"{client_file} を配置してから再実行してください。")
 
     print("  ブラウザが開きます。Google アカウントでアクセスを許可してください。")
+    print("  「このアプリは確認されていません」の警告は 詳細 → 移動 で進めます。")
     flow = InstalledAppFlow.from_client_secrets_file(client_file, google_auth.SCOPES)
-    creds = flow.run_local_server(port=0)
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception as e:
+        message = str(e)
+        if "access_denied" in message:
+            print()
+            warn("Google がアクセスを拒否しました (access_denied)")
+            print("    OAuth同意画面が「テスト中」のままの可能性が高いです。")
+            print("    https://console.cloud.google.com/auth/audience を開き、")
+            print("    「アプリを公開」で公開ステータスを「本番環境」にしてください。")
+            print("    (テストユーザーに自分を追加しても通りますが、")
+            print("     その場合トークンが7日で失効します)")
+            fail("公開設定を変更してから再実行してください。")
+        fail(f"Google の認証に失敗しました: {e}")
     google_auth.save_token(creds, token_path)
     ok(f"認証完了: {token_path}")
 
