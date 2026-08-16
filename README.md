@@ -181,7 +181,7 @@ botが作るものは、すべて1つのフォルダにまとまります。
 
 ### 前提条件
 
-- Python 3.10以上
+- Python 3.10以上（macOS標準の3.9では動きません）
 - Slackワークスペースの管理者権限（アプリ作成に必要）
 - Googleアカウント
 
@@ -310,7 +310,8 @@ Google の認証情報は使い回せるので、コピーすれば Step 2 と�
 git clone https://github.com/nnnnnnnnnke/slack-log-bot.git ~/Documents/slack-log-bot-B
 cd ~/Documents/slack-log-bot-B
 cp ~/Documents/slack-log-bot/client_secret.json ~/Documents/slack-log-bot/drive_token.json .
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python setup.py
 ```
 
@@ -324,10 +325,26 @@ Slack App は**ワークスペースごとに作成が必要**です（Step 1 �
 git clone https://github.com/nnnnnnnnnke/slack-log-bot.git
 cd slack-log-bot
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
+
+> [!IMPORTANT]
+> **Python 3.10 以上が必要です。**
+> macOS に最初から入っている `/usr/bin/python3` は 3.9 なので、
+> `python3 -m venv` だとそれを拾って `TypeError: unsupported operand type(s) for |`
+> で起動に失敗します。[uv](https://docs.astral.sh/uv/) を使うか、
+> 3.10以上の Python を明示してください。
+
+<details>
+<summary>uv を使わない場合</summary>
+
+```bash
+python3.13 -m venv .venv     # バージョンを明示する
+.venv/bin/pip install -r requirements.txt
+```
+
+</details>
 
 ---
 
