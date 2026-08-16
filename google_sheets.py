@@ -639,8 +639,8 @@ class SheetsHandler:
 
         for i, msg in enumerate(rows_data):
             if msg.get("thread_ts"):
-                requests.append(
-                    self._thread_background_request(sheet_id, start_row + i)
+                requests.extend(
+                    self._thread_background_requests(sheet_id, start_row + i)
                 )
 
         if requests:
@@ -699,21 +699,31 @@ class SheetsHandler:
         }
 
     @staticmethod
-    def _thread_background_request(sheet_id: int, row_number: int) -> dict:
-        """Thread reply background for one row."""
-        return {
-            "repeatCell": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "startRowIndex": row_number - 1,   # 0-indexed
-                    "endRowIndex": row_number,
-                    "startColumnIndex": 0,
-                    "endColumnIndex": len(HEADER_ROW),
-                },
-                "cell": {"userEnteredFormat": {"backgroundColor": COLOR_THREAD_BG}},
-                "fields": "userEnteredFormat.backgroundColor",
+    def _thread_background_requests(sheet_id: int, row_number: int) -> list[dict]:
+        """Thread reply background for one row, either side of the name cell.
+
+        The name cell is left out rather than painted and repainted: it carries
+        the author's colour, and whichever of the two was written last used to
+        win. Skipping the column makes the order stop mattering.
+        """
+        spans = [(0, USERNAME_COLUMN - 1), (USERNAME_COLUMN, len(HEADER_ROW))]
+        return [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row_number - 1,   # 0-indexed
+                        "endRowIndex": row_number,
+                        "startColumnIndex": first,
+                        "endColumnIndex": last,
+                    },
+                    "cell": {"userEnteredFormat": {"backgroundColor": COLOR_THREAD_BG}},
+                    "fields": "userEnteredFormat.backgroundColor",
+                }
             }
-        }
+            for first, last in spans
+            if last > first
+        ]
 
     # ── One spreadsheet per channel ──
 
@@ -1140,8 +1150,8 @@ class SheetsHandler:
                         worksheet.id, inserted_row, attachments
                     ))
                 if is_thread_reply:
-                    requests.append(
-                        self._thread_background_request(worksheet.id, inserted_row)
+                    requests.extend(
+                        self._thread_background_requests(worksheet.id, inserted_row)
                     )
                     # Re-adding a group over the row extends the thread's
                     # existing group rather than creating a second one.
