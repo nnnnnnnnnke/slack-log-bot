@@ -5,9 +5,11 @@ Private channels → separate spreadsheet per channel, shared with members only
 """
 
 import logging
+import math
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone, timedelta
 
 import gspread
@@ -93,17 +95,47 @@ THREAD_TS_COLUMN = 7
 # screen without horizontal scrolling.
 COLUMN_WIDTHS = [130, 120, 450, 150, 80, 90, 90]
 
-# A handful of long messages ran to 30-odd wrapped lines and pushed everything
-# else off screen, so data rows get a fixed height instead of growing to fit.
+# Rows grew to fit their content, so one long message could take thirty lines
+# and push everything else off screen. Sheets has no maximum row height —
+# pixelSize is exact — so each row's height is worked out from its message and
+# capped here instead: short messages stay on one line, long ones open up to
+# MAX_MESSAGE_LINES and no further.
 #
-# Sheets has no maximum row height — pixelSize is exact — so this is a single
-# height for every row. Four lines suits the middle of the distribution (a
-# median message is about three lines at the message column's width) without
-# leaving the short ones surrounded by whitespace. Longer messages are clipped
-# visually only: the text is intact, and selecting the cell shows all of it in
-# the formula bar. Raise this if reading long messages in place matters more
-# than fitting more rows on screen.
-DATA_ROW_HEIGHT = 84
+# Beyond the cap the text is clipped visually only. It is all still there: the
+# formula bar shows the whole message, and dragging the row's edge opens it up.
+ROW_HEIGHT_BASE = 21        # padding above and below the text
+ROW_HEIGHT_PER_LINE = 16    # one line of the 11pt message font
+MAX_MESSAGE_LINES = 6
+# Half-width characters that fit across the message column, allowing for the
+# cell's padding. Full-width characters count as two.
+MESSAGE_CHARS_PER_LINE = 66
+
+
+def _visual_width(text: str) -> int:
+    """Width in half-width units, so CJK counts double."""
+    return sum(
+        2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text
+    )
+
+
+def estimate_lines(text: str) -> int:
+    """How many lines a message takes once wrapped in the message column."""
+    if not text:
+        return 1
+    lines = 0
+    for paragraph in text.split("\n"):
+        width = _visual_width(paragraph)
+        lines += max(1, math.ceil(width / MESSAGE_CHARS_PER_LINE))
+    return lines
+
+
+def row_height_for(text: str) -> int:
+    lines = min(estimate_lines(text), MAX_MESSAGE_LINES)
+    return ROW_HEIGHT_BASE + ROW_HEIGHT_PER_LINE * lines
+
+
+# Height of an empty row, used for the unwritten part of the grid
+DATA_ROW_HEIGHT = row_height_for("")
 
 # Colors (RGB 0-1 float)
 COLOR_HEADER_BG = {"red": 0.118, "green": 0.557, "blue": 0.243}   # #1e8e3e Green
@@ -308,6 +340,56 @@ class SheetsHandler:
         except Exception as e:
             logger.warning(f"Failed to apply formatting: {e}")
 
+    def _row_height_requests(
+        self, sheet_id: int, start_row: int, texts: list[str]
+    ) -> list[dict]:
+        """Per-row heights, with runs of the same height merged into one request."""
+        requests = []
+        run_height = None
+        run_start = start_row
+
+        for offset, text in enumerate(texts):
+            height = row_height_for(text)
+            if height != run_height:
+                if run_height is not None:
+                    requests.append(self._row_height_request(
+                        sheet_id, run_start, start_row + offset, run_height
+                    ))
+                run_height, run_start = height, start_row + offset
+
+        if run_height is not None:
+            requests.append(self._row_height_request(
+                sheet_id, run_start, start_row + len(texts), run_height
+            ))
+        return requests
+
+    @staticmethod
+    def _row_height_request(sheet_id: int, first_row: int, after_row: int, height: int) -> dict:
+        return {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": first_row - 1,   # 1-indexed row -> 0-indexed
+                    "endIndex": after_row - 1,
+                },
+                "properties": {"pixelSize": height},
+                "fields": "pixelSize",
+            }
+        }
+
+    def apply_row_heights(
+        self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
+        start_row: int, texts: list[str],
+    ):
+        requests = self._row_height_requests(worksheet.id, start_row, texts)
+        if not requests:
+            return
+        try:
+            _retry(spreadsheet.batch_update, {"requests": requests})
+        except Exception as e:
+            logger.warning(f"Failed to set row heights: {e}")
+
     def _format_thread_rows(
         self,
         worksheet: gspread.Worksheet,
@@ -321,24 +403,9 @@ class SheetsHandler:
 
         for i, msg in enumerate(rows_data):
             if msg.get("thread_ts"):
-                row_index = start_row + i - 1  # 0-indexed
-                requests.append({
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": row_index,
-                            "endRowIndex": row_index + 1,
-                            "startColumnIndex": 0,
-                            "endColumnIndex": len(HEADER_ROW),
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "backgroundColor": COLOR_THREAD_BG,
-                            }
-                        },
-                        "fields": "userEnteredFormat.backgroundColor",
-                    }
-                })
+                requests.append(
+                    self._thread_background_request(sheet_id, start_row + i)
+                )
 
         if requests:
             try:
@@ -346,35 +413,22 @@ class SheetsHandler:
             except Exception as e:
                 logger.warning(f"Failed to format thread rows: {e}")
 
-    def _format_single_thread_row(
-        self,
-        worksheet: gspread.Worksheet,
-        spreadsheet: gspread.Spreadsheet,
-        row_number: int,
-    ):
-        """Apply thread reply background to a single row (for realtime insert)."""
-        sheet_id = worksheet.id
-        row_index = row_number - 1  # 0-indexed
-        try:
-            _retry(spreadsheet.batch_update, {"requests": [{
-                "repeatCell": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": row_index,
-                        "endRowIndex": row_index + 1,
-                        "startColumnIndex": 0,
-                        "endColumnIndex": len(HEADER_ROW),
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "backgroundColor": COLOR_THREAD_BG,
-                        }
-                    },
-                    "fields": "userEnteredFormat.backgroundColor",
-                }
-            }]})
-        except Exception as e:
-            logger.warning(f"Failed to format thread row: {e}")
+    @staticmethod
+    def _thread_background_request(sheet_id: int, row_number: int) -> dict:
+        """Thread reply background for one row."""
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": row_number - 1,   # 0-indexed
+                    "endRowIndex": row_number,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": len(HEADER_ROW),
+                },
+                "cell": {"userEnteredFormat": {"backgroundColor": COLOR_THREAD_BG}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        }
 
     # ── One spreadsheet per channel ──
 
@@ -682,14 +736,27 @@ class SheetsHandler:
                     )
                     inserted_row = _appended_row_number(resp)
             else:
-                _retry(
+                resp = _retry(
                     worksheet.append_row, row,
                     value_input_option="RAW", idempotent=False,
                 )
 
-            # Color thread reply row
-            if is_thread_reply and inserted_row:
-                self._format_single_thread_row(worksheet, spreadsheet, inserted_row)
+            # Height for this row, plus the reply background when it is one.
+            # Bundled into a single batch so a message costs one extra call.
+            if inserted_row is None and not is_thread_reply:
+                inserted_row = _appended_row_number(resp)
+            if inserted_row:
+                requests = self._row_height_requests(
+                    worksheet.id, inserted_row, [text]
+                )
+                if is_thread_reply:
+                    requests.append(
+                        self._thread_background_request(worksheet.id, inserted_row)
+                    )
+                try:
+                    _retry(spreadsheet.batch_update, {"requests": requests})
+                except Exception as e:
+                    logger.warning(f"Failed to style row {inserted_row}: {e}")
 
             existing.add(ts)
 
@@ -806,8 +873,12 @@ class SheetsHandler:
         )
         start_row = _appended_row_number(resp)
 
-        # Apply thread reply background colors
+        # Row heights and thread reply backgrounds
         if start_row:
+            self.apply_row_heights(
+                worksheet, spreadsheet, start_row,
+                [m.get("text", "") for m in ordered_msgs],
+            )
             self._format_thread_rows(worksheet, spreadsheet, start_row, ordered_msgs)
         else:
             logger.warning(
