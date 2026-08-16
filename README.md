@@ -45,6 +45,7 @@ slack_log_bot/
 ├── slack_utils.py        # Slackユーザー・チャンネル情報の解決
 ├── config.py             # 環境変数の読み込み
 ├── setup_drive_auth.py   # Google Drive OAuth2認証セットアップ
+├── slack-app-manifest.yml # Slack Appマニフェスト（貼るだけでApp設定完了）
 ├── requirements.txt      # Python依存パッケージ
 ├── .env.example          # 環境変数テンプレート
 └── .gitignore
@@ -137,15 +138,43 @@ slack_log_bot/
 
 ### Step 1: Slack Appの作成
 
-#### 1-1. アプリ作成
+このリポジトリの [`slack-app-manifest.yml`](slack-app-manifest.yml) を貼り付けるだけで、
+スコープ・イベント・Socket Mode がすべて設定済みのアプリが作られます。
+
+#### 1-1. マニフェストからアプリを作成
 
 1. [Slack API](https://api.slack.com/apps) にアクセス
-2. **「Create New App」** → **「From scratch」** を選択
-3. アプリ名（例: `Log Bot`）を入力し、対象のワークスペースを選択
+2. **「Create New App」** → **「From an app manifest」** を選択
+3. 対象のワークスペースを選んで **「Next」**
+4. **YAML** タブを開き、[`slack-app-manifest.yml`](slack-app-manifest.yml) の中身をまるごと貼り付けて **「Next」**
+5. 権限の確認画面が出るので **「Create」**
 
-#### 1-2. OAuth & Permissions（権限設定）
+> アプリ名を変えたい場合は、貼り付ける前に YAML 内の `display_information.name` と
+> `features.bot_user.display_name` の両方を書き換えてください。
 
-左メニュー **「OAuth & Permissions」** → **「Bot Token Scopes」** に以下を追加:
+#### 1-2. App-Level Token の生成
+
+App-Level Token だけはマニフェストで作れないため、手動で生成します。
+
+1. 左メニュー **「Basic Information」** → **「App-Level Tokens」** → **「Generate Token and Scopes」**
+2. Token名: `socket-token`、Scope: **`connections:write`** を追加して **「Generate」**
+3. 生成された `xapp-...` トークンを控えておく（この画面を閉じると再表示できません）
+
+#### 1-3. アプリのインストール
+
+1. 左メニュー **「Install App」** → **「Install to Workspace」**
+2. 権限を確認して **「許可する」**
+3. 表示される **Bot User OAuth Token**（`xoxb-...`）を控えておく
+4. 記録したいチャンネルにbotを招待:
+   ```
+   /invite @Log Bot
+   ```
+   > プライベートチャンネルにも忘れずに招待してください
+
+<details>
+<summary><b>マニフェストを使わず手動で設定する場合（既存アプリに追加するときなど）</b></summary>
+
+**OAuth & Permissions** → **Bot Token Scopes** に以下を追加:
 
 | Scope | 用途 |
 |-------|------|
@@ -158,32 +187,20 @@ slack_log_bot/
 | `files:read` | 添付ファイルのダウンロード |
 | `chat:write` | botのメッセージ送信（コマンド応答に必要） |
 
-#### 1-3. Event Subscriptions
+**Event Subscriptions** → **Enable Events** をON → **Subscribe to bot events** に以下を追加:
 
-1. 左メニュー **「Event Subscriptions」** → **Enable Events** をON
-2. **「Subscribe to bot events」** で以下を追加:
-   - `message.channels` — パブリックチャンネルのメッセージ
-   - `message.groups` — プライベートチャンネルのメッセージ
-   - `app_mention` — botへのメンション（コマンド応答に必要）
+- `message.channels` — パブリックチャンネルのメッセージ
+- `message.groups` — プライベートチャンネルのメッセージ
+- `app_mention` — botへのメンション（コマンド応答に必要）
 
-#### 1-4. Socket Mode
+**Socket Mode** → **Enable Socket Mode** をON。
 
-1. 左メニュー **「Socket Mode」** → **Enable Socket Mode** をON
-2. App-Level Token を生成:
-   - Token名: `socket-token`
-   - Scope: `connections:write`
-3. 生成された `xapp-...` トークンを控えておく
+その後、上記 1-2（App-Level Token 生成）と 1-3（インストール）を実施してください。
 
-#### 1-5. アプリのインストール
+> 既存アプリのマニフェストを差し替える方法もあります:
+> **「App Manifest」** 画面で YAML を貼り替えて **「Save Changes」** → その後アプリの再インストールが必要です。
 
-1. 左メニュー **「Install App」** → **「Install to Workspace」**
-2. 権限を確認して **「許可する」**
-3. 表示される **Bot User OAuth Token**（`xoxb-...`）を控えておく
-4. 記録したいチャンネルにbotを招待:
-   ```
-   /invite @Log Bot
-   ```
-   > プライベートチャンネルにも忘れずに招待してください
+</details>
 
 ---
 

@@ -1,0 +1,77 @@
+## Slack App Manifest for Slack Log Bot
+##
+## 使い方:
+##   1. https://api.slack.com/apps → "Create New App" → "From an app manifest"
+##   2. 対象のワークスペースを選択
+##   3. YAML タブを開き、このファイルの中身をまるごと貼り付け
+##   4. "Next" → "Create"
+##
+## これでスコープ・イベント・Socket Mode がすべて設定済みのアプリが作られます。
+## 作成後にやることは 2 つだけ:
+##   - App-Level Token (xapp-...) の生成 … Basic Information → App-Level Tokens
+##     ※ App-Level Token だけは manifest で作れないため手動生成が必要です
+##   - ワークスペースへのインストール … Install App → Install to Workspace
+##
+## アプリ名を変えたい場合は display_information.name と
+## features.bot_user.display_name の両方を書き換えてください。
+
+_metadata:
+  major_version: 1
+  minor_version: 1
+
+display_information:
+  name: Log Bot
+  description: Slack の投稿・スレッド・添付ファイルを Google スプレッドシート/Drive に保存します
+  background_color: "#1e8e3e"
+  long_description: |-
+    Slack 無料プランではメッセージ履歴が一定期間で見えなくなります。
+    このアプリは投稿・スレッド返信・添付ファイルを自動で Google スプレッドシートと Google Drive に保存し、
+    過去ログをいつでも検索・閲覧できる状態に保ちます。
+
+    - リアルタイム収集: Socket Mode で常駐し、投稿を即時記録
+    - 週次定期収集とバックフィル: 取りこぼしを後から回収
+    - 添付ファイル: Slack からダウンロードして Google Drive にチャンネル別で保存
+    - アクセス制御: パブリックはリンク共有、プライベートはチャンネルメンバー限定共有
+
+    チャンネル内で bot にメンションすると、スプレッドシート URL の表示・バックフィル・
+    リセットなどのコマンドが使えます。
+
+features:
+  bot_user:
+    display_name: Log Bot
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      # パブリックチャンネルのメッセージ履歴読み取り
+      - channels:history
+      # チャンネル情報（名前等）の取得
+      - channels:read
+      # プライベートチャンネルのメッセージ履歴読み取り
+      - groups:history
+      # プライベートチャンネル情報・メンバー一覧の取得
+      - groups:read
+      # ユーザー名・表示名の取得
+      - users:read
+      # ユーザーのメールアドレス取得（プライベートチャンネルの共有制御に必要）
+      - users:read.email
+      # 添付ファイルのダウンロード
+      - files:read
+      # bot のメッセージ送信（コマンド応答に必要）
+      - chat:write
+
+settings:
+  event_subscriptions:
+    bot_events:
+      # bot へのメンション（コマンド応答に必要）
+      - app_mention
+      # パブリックチャンネルのメッセージ
+      - message.channels
+      # プライベートチャンネルのメッセージ
+      - message.groups
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
