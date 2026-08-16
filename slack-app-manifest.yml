@@ -76,6 +76,9 @@ settings:
       - member_joined_channel
       # メンバー退出 → 共有を自動で解除
       - member_left_channel
+      # チャンネル名変更 → スプレッドシート/フォルダ名を追従
+      - channel_rename
+      - group_rename
   interactivity:
     is_enabled: false
   org_deploy_enabled: false

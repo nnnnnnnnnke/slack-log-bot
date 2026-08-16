@@ -19,6 +19,7 @@ from slack_utils import (
     get_user_info,
     resolve_mentions,
     install_retry_handlers,
+    invalidate_channel,
     invalidate_members,
 )
 
@@ -56,13 +57,14 @@ def bot_user_ids(client) -> tuple[str, ...]:
 
 
 def process_files(
-    files: list[dict], channel_name: str, member_emails: list[str] | None
+    files: list[dict], channel_name: str, member_emails: list[str] | None,
+    channel_id: str,
 ) -> list[str]:
     links = []
     for file_info in files:
         link = drive.download_from_slack_and_upload(
             file_info, config.SLACK_BOT_TOKEN, channel_name,
-            member_emails,
+            member_emails, channel_id,
         )
         if link:
             links.append(link)
@@ -102,6 +104,7 @@ def handle_message(event, client, logger):
             thread_ts=thread_ts,
             attachments=[],
             member_emails=member_emails,
+            channel_id=channel_id,
         )
     except Exception as e:
         logger.error(f"Failed to log message to Sheets: {e}")
@@ -109,10 +112,10 @@ def handle_message(event, client, logger):
     # Upload files in background and update attachment column
     if files:
         def upload_files():
-            links = process_files(files, channel_name, member_emails)
+            links = process_files(files, channel_name, member_emails, channel_id)
             if links:
                 sheets.update_attachment_links(
-                    channel_name, ts, links, member_emails,
+                    channel_name, ts, links, member_emails, channel_id,
                 )
 
         threading.Thread(target=upload_files, daemon=True).start()
@@ -130,7 +133,9 @@ def _sync_access(client, channel_id: str, channel_name: str, revoke: list[str] |
     granted = revoked = 0
     for handler in (sheets, drive):
         try:
-            g, r = handler.sync_channel_access(channel_name, member_emails, revoke)
+            g, r = handler.sync_channel_access(
+                channel_name, member_emails, revoke, channel_id
+            )
             granted += g
             revoked += r
         except Exception as e:
@@ -174,6 +179,26 @@ def handle_member_left(event, client, logger):
     _, revoked = _sync_access(client, channel_id, channel_name, revoke=[email])
     if revoked:
         logger.info(f"Revoked {email} from #{channel_name}")
+
+
+@app.event("channel_rename")
+@app.event("group_rename")
+def handle_channel_rename(event, client, logger):
+    """Keep the channel's spreadsheet and folder with it when it is renamed."""
+    channel = event.get("channel") or {}
+    channel_id, new_name = channel.get("id", ""), channel.get("name", "")
+    if not channel_id or not new_name:
+        return
+
+    invalidate_channel(channel_id)
+    moved = False
+    for handler in (sheets, drive):
+        try:
+            moved |= handler.rename_channel(channel_id, new_name)
+        except Exception as e:
+            logger.error(f"Failed to follow the rename of {channel_id}: {e}")
+    if moved:
+        logger.info(f"Followed channel rename to #{new_name}")
 
 
 @app.event("app_mention")
@@ -228,7 +253,7 @@ def handle_mention(event, client, say, logger):
         def run_reset():
             try:
                 backup_name = sheets.backup_and_reset_channel(
-                    channel_name, member_emails,
+                    channel_name, member_emails, channel_id,
                 )
                 if backup_name:
                     client.chat_postMessage(
@@ -308,7 +333,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
     # Attachments of messages already recorded would be downloaded and
     # re-uploaded on every run: the rows get deduped at write time, the Drive
     # files do not, so each run leaves another copy behind.
-    known_ts = sheets.recorded_ts(channel_name, member_emails)
+    known_ts = sheets.recorded_ts(channel_name, member_emails, channel_id)
 
     oldest = datetime.now(timezone.utc) - timedelta(days=days)
     oldest_ts = str(oldest.timestamp())
@@ -319,7 +344,7 @@ def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
     )
 
     new_count, skip_count = sheets.write_messages_grouped(
-        channel_name, collected, member_emails,
+        channel_name, collected, member_emails, channel_id,
     )
     logger.info(f"Backfill #{channel_name}: {new_count} new, {skip_count} skipped")
 

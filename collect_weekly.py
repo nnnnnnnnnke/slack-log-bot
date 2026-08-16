@@ -92,8 +92,8 @@ def collect(channel_filter: str | None = None, days: int = 8):
         # missed while it was down.
         member_emails = get_member_emails(client, ch_id)
         try:
-            granted, _ = sheets.sync_channel_access(ch_name, member_emails)
-            granted += drive.sync_channel_access(ch_name, member_emails)[0]
+            granted, _ = sheets.sync_channel_access(ch_name, member_emails, channel_id=ch_id)
+            granted += drive.sync_channel_access(ch_name, member_emails, channel_id=ch_id)[0]
             if granted:
                 logger.info(f"  #{ch_name}: shared with {granted} new member(s)")
         except Exception as e:
@@ -102,7 +102,7 @@ def collect(channel_filter: str | None = None, days: int = 8):
         # Attachments of messages already recorded would be downloaded and
         # re-uploaded on every run: the rows get deduped at write time, the
         # Drive files do not, so each run leaves another copy behind.
-        known_ts = sheets.recorded_ts(ch_name, member_emails)
+        known_ts = sheets.recorded_ts(ch_name, member_emails, ch_id)
 
         collected = fetch_channel_messages(
             client, drive, ch_id, ch_name, oldest_ts, known_ts, member_emails,
@@ -111,7 +111,7 @@ def collect(channel_filter: str | None = None, days: int = 8):
 
         # Phase 2: Write grouped by thread
         new_count, skip_count = sheets.write_messages_grouped(
-            ch_name, collected, member_emails,
+            ch_name, collected, member_emails, ch_id,
         )
         logger.info(f"  #{ch_name}: {new_count} new, {skip_count} duplicates skipped")
         total_new += new_count

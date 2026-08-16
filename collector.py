@@ -21,11 +21,13 @@ SKIP_SUBTYPES = ("bot_message", "channel_join", "channel_leave")
 PAGE_SIZE = 200
 
 
-def _collect_attachments(drive, files, channel_name, member_emails) -> list[tuple[str, str]]:
+def _collect_attachments(
+    drive, files, channel_name, member_emails, channel_id
+) -> list[tuple[str, str]]:
     attachments = []
     for file_info in files:
         stored = drive.download_from_slack_and_upload(
-            file_info, config.SLACK_BOT_TOKEN, channel_name, member_emails,
+            file_info, config.SLACK_BOT_TOKEN, channel_name, member_emails, channel_id,
         )
         if stored:
             attachments.append(stored)
@@ -34,6 +36,7 @@ def _collect_attachments(drive, files, channel_name, member_emails) -> list[tupl
 
 def _build_entry(
     client, drive, message, channel_name, member_emails, known_ts, thread_ts,
+    channel_id,
 ) -> dict | None:
     user_id = message.get("user", "")
     if not user_id:
@@ -47,7 +50,7 @@ def _build_entry(
     attachments = []
     if ts not in known_ts:
         attachments = _collect_attachments(
-            drive, message.get("files", []), channel_name, member_emails
+            drive, message.get("files", []), channel_name, member_emails, channel_id
         )
 
     return {
@@ -94,7 +97,8 @@ def fetch_channel_messages(
                 continue
 
             entry = _build_entry(
-                client, drive, message, channel_name, member_emails, known_ts, None
+                client, drive, message, channel_name, member_emails, known_ts,
+                None, channel_id,
             )
             if entry is None:
                 continue
@@ -133,7 +137,8 @@ def _fetch_replies(
         if reply.get("user", "") in skip_user_ids:
             continue
         entry = _build_entry(
-            client, drive, reply, channel_name, member_emails, known_ts, parent_ts
+            client, drive, reply, channel_name, member_emails, known_ts,
+            parent_ts, channel_id,
         )
         if entry is not None:
             replies.append(entry)

@@ -152,6 +152,10 @@ COLOR_THREAD_BG = {"red": 0.902, "green": 0.957, "blue": 0.918}   # #e6f4ea Ligh
 COLOR_TS_FG = {"red": 0.55, "green": 0.55, "blue": 0.55}          # #8C8C8C gray
 COLOR_LINK = {"red": 0.066, "green": 0.333, "blue": 0.8}          # #1155cc link blue
 
+# Drive appProperty tying a spreadsheet to its Slack channel, so a rename
+# does not orphan the history under the old name.
+CHANNEL_ID_PROPERTY = "slackChannelId"
+
 JST = timezone(timedelta(hours=9))
 
 # Thread reply prefix
@@ -505,40 +509,88 @@ class SheetsHandler:
         return added
 
     def sync_channel_access(
-        self, channel_name: str, member_emails: list[str], revoke: list[str] | None = None
+        self, channel_name: str, member_emails: list[str],
+        revoke: list[str] | None = None, channel_id: str = "",
     ) -> tuple[int, int]:
         """Match the channel spreadsheet's readers to the channel's membership."""
-        ss = self._get_or_create_channel_spreadsheet(channel_name, member_emails)
+        ss = self._get_or_create_channel_spreadsheet(
+            channel_name, member_emails, channel_id
+        )
         return sync_permissions(self._drive, ss.id, member_emails, revoke)
 
+    def _find_by_channel_id(self, channel_id: str) -> dict | None:
+        """The spreadsheet stamped with this channel id, if there is one."""
+        if not channel_id:
+            return None
+        query = (
+            f"appProperties has {{ key='{CHANNEL_ID_PROPERTY}' and value='{channel_id}' }} "
+            f"and '{self.drive_folder_id}' in parents and trashed = false"
+        )
+        try:
+            files = self._drive.files().list(
+                q=query, fields="files(id, name)", pageSize=1
+            ).execute().get("files", [])
+        except Exception as e:
+            logger.warning(f"Could not search by channel id: {e}")
+            return None
+        return files[0] if files else None
+
+    def _find_by_name(self, name: str) -> dict | None:
+        query = (
+            f"name = '{name}' and '{self.drive_folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        )
+        files = self._drive.files().list(
+            q=query, fields="files(id, name)", pageSize=1
+        ).execute().get("files", [])
+        return files[0] if files else None
+
+    def _stamp_channel_id(self, file_id: str, channel_id: str, name: str | None = None):
+        """Record the channel id on the file, and optionally rename it."""
+        body = {"appProperties": {CHANNEL_ID_PROPERTY: channel_id}}
+        if name:
+            body["name"] = name
+        try:
+            self._drive.files().update(fileId=file_id, body=body, fields="id").execute()
+        except Exception as e:
+            logger.warning(f"Could not stamp {file_id} with the channel id: {e}")
+
     def _get_or_create_channel_spreadsheet(
-        self, channel_name: str, member_emails: list[str] | None = None
+        self, channel_name: str, member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> gspread.Spreadsheet:
         """The channel's own spreadsheet, shared with that channel's members.
 
         Every channel gets its own file rather than a tab in a shared one:
         Sheets grants access per file, so a tab cannot be handed to one group
         without handing over every other channel in the same spreadsheet.
+
+        The file is found by the channel id stamped on it, not by its name: a
+        renamed channel would otherwise not match its own spreadsheet, and a
+        second one would be created with the history left behind in the first.
         """
         if channel_name in self._channel_spreadsheets:
             return self._channel_spreadsheets[channel_name]
 
         ss_name = self._channel_spreadsheet_name(channel_name)
-        query = (
-            f"name = '{ss_name}' and "
-            f"'{self.drive_folder_id}' in parents and "
-            f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
-            f"trashed = false"
-        )
-        results = self._drive.files().list(
-            q=query, fields="files(id, name)", pageSize=1
-        ).execute()
-        files = results.get("files", [])
+        found = self._find_by_channel_id(channel_id)
+        if found and found["name"] != ss_name:
+            # The channel was renamed while nothing was watching.
+            logger.info(f"Renaming {found['name']} -> {ss_name}")
+            self._stamp_channel_id(found["id"], channel_id, ss_name)
 
-        if files:
-            ss = self.gc.open_by_key(files[0]["id"])
+        if not found:
+            # Either a sheet from before ids were stamped, or a new channel.
+            found = self._find_by_name(ss_name)
+            if found and channel_id:
+                self._stamp_channel_id(found["id"], channel_id)
+
+        if found:
+            ss = self.gc.open_by_key(found["id"])
         else:
             ss = self.gc.create(ss_name, folder_id=self.drive_folder_id)
+            if channel_id:
+                self._stamp_channel_id(ss.id, channel_id)
             shared = self.share_with_members(ss, member_emails or [])
             logger.info(f"Created spreadsheet: {ss_name} (shared with {shared} members)")
             if not shared:
@@ -583,12 +635,15 @@ class SheetsHandler:
         return entries
 
     def _get_or_create_channel_sheet(
-        self, channel_name: str, member_emails: list[str] | None = None
+        self, channel_name: str, member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> gspread.Worksheet:
         if channel_name in self._sheet_cache:
             return self._sheet_cache[channel_name]
 
-        ss = self._get_or_create_channel_spreadsheet(channel_name, member_emails)
+        ss = self._get_or_create_channel_spreadsheet(
+            channel_name, member_emails, channel_id
+        )
 
         try:
             worksheet = ss.worksheet(channel_name)
@@ -611,9 +666,10 @@ class SheetsHandler:
     # ── Shared logic ──
 
     def _get_worksheet(
-        self, channel_name: str, member_emails: list[str] | None = None
+        self, channel_name: str, member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> gspread.Worksheet:
-        return self._get_or_create_channel_sheet(channel_name, member_emails)
+        return self._get_or_create_channel_sheet(channel_name, member_emails, channel_id)
 
     def _get_spreadsheet(self, channel_name: str) -> gspread.Spreadsheet:
         """The Spreadsheet object a worksheet belongs to, for formatting calls."""
@@ -712,6 +768,7 @@ class SheetsHandler:
     def recorded_ts(
         self, channel_name: str,
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> set[str]:
         """Message TSs already in the sheet for this channel.
 
@@ -720,8 +777,34 @@ class SheetsHandler:
         time, so those uploads are discarded, but Drive keeps every copy.
         """
         with self._lock:
-            worksheet = self._get_worksheet(channel_name, member_emails)
+            worksheet = self._get_worksheet(channel_name, member_emails, channel_id)
             return set(self._load_existing_ts(channel_name, worksheet))
+
+    def rename_channel(self, channel_id: str, new_name: str) -> bool:
+        """Follow a channel rename so its history stays in one spreadsheet."""
+        with self._lock:
+            found = self._find_by_channel_id(channel_id)
+            if not found:
+                return False
+            new_title = self._channel_spreadsheet_name(new_name)
+            if found["name"] != new_title:
+                self._stamp_channel_id(found["id"], channel_id, new_title)
+            try:
+                spreadsheet = self.gc.open_by_key(found["id"])
+                worksheet = spreadsheet.sheet1
+                if worksheet.title != new_name:
+                    _retry(worksheet.update_title, new_name, idempotent=False)
+            except Exception as e:
+                logger.warning(f"Could not rename the tab for {new_name}: {e}")
+            # Caches are keyed by channel name, so the old key must go.
+            self._clear_cache_locked()
+            self._index_entries.clear()
+            try:
+                write_channel_index(self.index_spreadsheet, self._collect_index_entries())
+            except Exception as e:
+                logger.warning(f"Could not refresh the channel index: {e}")
+            logger.info(f"Renamed the log spreadsheet to {new_title}")
+            return True
 
     def get_spreadsheet_url(self, channel_name: str) -> str | None:
         """Return the spreadsheet URL for a channel, or None if it has none yet."""
@@ -758,9 +841,10 @@ class SheetsHandler:
         thread_ts: str | None,
         attachments: list[tuple[str, str]],
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> bool:
         with self._lock:
-            worksheet = self._get_worksheet(channel_name, member_emails)
+            worksheet = self._get_worksheet(channel_name, member_emails, channel_id)
             spreadsheet = self._get_spreadsheet(channel_name)
 
             existing = self._load_existing_ts(channel_name, worksheet)
@@ -877,10 +961,11 @@ class SheetsHandler:
         channel_name: str,
         messages: list[dict],
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> tuple[int, int]:
         with self._lock:
             return self._write_messages_grouped_locked(
-                channel_name, messages, member_emails,
+                channel_name, messages, member_emails, channel_id,
             )
 
     def _write_messages_grouped_locked(
@@ -888,8 +973,9 @@ class SheetsHandler:
         channel_name: str,
         messages: list[dict],
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> tuple[int, int]:
-        worksheet = self._get_worksheet(channel_name, member_emails)
+        worksheet = self._get_worksheet(channel_name, member_emails, channel_id)
         spreadsheet = self._get_spreadsheet(channel_name)
         existing = self._load_existing_ts(channel_name, worksheet)
 

@@ -18,6 +18,10 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # rather than one folder per channel mixed in among them.
 ATTACHMENTS_FOLDER_NAME = "添付ファイル"
 
+# Drive appProperty tying a channel folder to its Slack channel, so a rename
+# does not strand the files under the old name.
+CHANNEL_ID_PROPERTY = "slackChannelId"
+
 
 def sync_permissions(
     service, file_id: str, member_emails: list[str], revoke: list[str] | None = None
@@ -138,16 +142,67 @@ class DriveHandler:
         self._attachments_root = folder_id
         return folder_id
 
+    def _find_by_channel_id(self, channel_id: str, parent: str) -> dict | None:
+        if not channel_id:
+            return None
+        query = (
+            f"appProperties has {{ key='{CHANNEL_ID_PROPERTY}' and value='{channel_id}' }} "
+            f"and '{parent}' in parents and trashed = false"
+        )
+        try:
+            files = self.service.files().list(
+                q=query, fields="files(id, name)", pageSize=1
+            ).execute().get("files", [])
+        except Exception as e:
+            logger.warning(f"Could not search folders by channel id: {e}")
+            return None
+        return files[0] if files else None
+
+    def _stamp_channel_id(self, file_id: str, channel_id: str, name: str | None = None):
+        body = {"appProperties": {CHANNEL_ID_PROPERTY: channel_id}}
+        if name:
+            body["name"] = name
+        try:
+            self.service.files().update(fileId=file_id, body=body, fields="id").execute()
+        except Exception as e:
+            logger.warning(f"Could not stamp folder {file_id}: {e}")
+
+    def rename_channel(self, channel_id: str, new_name: str) -> bool:
+        """Follow a channel rename so uploads keep landing in the same folder."""
+        attachments_root = self._get_attachments_root()
+        found = self._find_by_channel_id(channel_id, attachments_root)
+        if not found:
+            return False
+        if found["name"] != f"#{new_name}":
+            self._stamp_channel_id(found["id"], channel_id, f"#{new_name}")
+        self._channel_folders.clear()
+        return True
+
     def _get_or_create_channel_folder(
-        self, channel_name: str, member_emails: list[str] | None = None
+        self, channel_name: str, member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> str:
-        """Get or create the channel's folder under the attachments folder."""
+        """Get or create the channel's folder under the attachments folder.
+
+        Located by the channel id stamped on it, so a renamed channel keeps
+        uploading into the folder that already holds its files.
+        """
         if channel_name in self._channel_folders:
             return self._channel_folders[channel_name]
 
         attachments_root = self._get_attachments_root()
         folder_name = f"#{channel_name}"
+
+        stamped = self._find_by_channel_id(channel_id, attachments_root)
+        if stamped:
+            if stamped["name"] != folder_name:
+                self._stamp_channel_id(stamped["id"], channel_id, folder_name)
+            self._channel_folders[channel_name] = stamped["id"]
+            return stamped["id"]
+
         folder_id = self._find_folder(folder_name, attachments_root)
+        if folder_id and channel_id:
+            self._stamp_channel_id(folder_id, channel_id)
 
         if not folder_id:
             # Channel folders used to sit directly under the root folder. Adopt
@@ -170,6 +225,7 @@ class DriveHandler:
                     "name": folder_name,
                     "mimeType": FOLDER_MIME,
                     "parents": [attachments_root],
+                    "appProperties": {CHANNEL_ID_PROPERTY: channel_id} if channel_id else {},
                 },
                 fields="id",
             ).execute()
@@ -186,10 +242,13 @@ class DriveHandler:
         return folder_id
 
     def sync_channel_access(
-        self, channel_name: str, member_emails: list[str], revoke: list[str] | None = None
+        self, channel_name: str, member_emails: list[str],
+        revoke: list[str] | None = None, channel_id: str = "",
     ) -> tuple[int, int]:
         """Match the channel folder's readers to the channel's membership."""
-        folder_id = self._get_or_create_channel_folder(channel_name, member_emails)
+        folder_id = self._get_or_create_channel_folder(
+            channel_name, member_emails, channel_id
+        )
         return sync_permissions(self.service, folder_id, member_emails, revoke)
 
     def upload_file(
@@ -199,9 +258,12 @@ class DriveHandler:
         mime_type: str,
         channel_name: str,
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> tuple[str, str]:
         """Upload a file to the channel's folder. Returns (file name, link)."""
-        folder_id = self._get_or_create_channel_folder(channel_name, member_emails)
+        folder_id = self._get_or_create_channel_folder(
+            channel_name, member_emails, channel_id
+        )
 
         file_metadata = {
             "name": file_name,
@@ -228,6 +290,7 @@ class DriveHandler:
         slack_token: str,
         channel_name: str,
         member_emails: list[str] | None = None,
+        channel_id: str = "",
     ) -> tuple[str, str] | None:
         """Download a file from Slack and upload it to Google Drive.
 
@@ -264,7 +327,7 @@ class DriveHandler:
         try:
             return self.upload_file(
                 file_name, resp.content, mime_type,
-                channel_name, member_emails,
+                channel_name, member_emails, channel_id,
             )
         except Exception as e:
             logger.error(f"Failed to upload to Drive: {e}")
