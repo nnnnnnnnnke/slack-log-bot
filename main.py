@@ -18,6 +18,7 @@ from slack_utils import (
     get_member_emails,
     get_user_info,
     install_retry_handlers,
+    invalidate_members,
 )
 
 logging.basicConfig(
@@ -103,12 +104,66 @@ def handle_file_shared(event, client, logger):
     pass
 
 
+def _sync_access(client, channel_id: str, channel_name: str, revoke: list[str] | None = None):
+    """Bring the channel's spreadsheet and folder in line with its membership."""
+    invalidate_members(channel_id)
+    member_emails = get_member_emails(client, channel_id)
+    granted = revoked = 0
+    for handler in (sheets, drive):
+        try:
+            g, r = handler.sync_channel_access(channel_name, member_emails, revoke)
+            granted += g
+            revoked += r
+        except Exception as e:
+            logger.error(f"Failed to sync access for #{channel_name}: {e}")
+    return granted, revoked
+
+
+@app.event("member_joined_channel")
+def handle_member_joined(event, client, logger):
+    """Share the channel's log with whoever just joined."""
+    channel_id = event.get("channel", "")
+    user_id = event.get("user", "")
+    if not channel_id or not user_id:
+        return
+
+    channel_name = get_channel_info(client, channel_id)["name"]
+    _, _, email = get_user_info(client, user_id)
+    if not email:
+        # Bots have no email, and neither do accounts the token cannot read.
+        logger.info(f"Joined #{channel_name}: {user_id} has no email, nothing to share")
+        return
+
+    granted, _ = _sync_access(client, channel_id, channel_name)
+    if granted:
+        logger.info(f"Shared #{channel_name} with {granted} new member(s)")
+
+
+@app.event("member_left_channel")
+def handle_member_left(event, client, logger):
+    """Revoke the channel's log from whoever just left."""
+    channel_id = event.get("channel", "")
+    user_id = event.get("user", "")
+    if not channel_id or not user_id:
+        return
+
+    channel_name = get_channel_info(client, channel_id)["name"]
+    _, _, email = get_user_info(client, user_id)
+    if not email:
+        return
+
+    _, revoked = _sync_access(client, channel_id, channel_name, revoke=[email])
+    if revoked:
+        logger.info(f"Revoked {email} from #{channel_name}")
+
+
 @app.event("app_mention")
 def handle_mention(event, client, say, logger):
     """Handle @bot mentions. Commands:
     @bot              → Show spreadsheet URL + help
     @bot backfill     → Collect past messages (default 90 days)
     @bot backfill 30  → Collect past 30 days
+    @bot share        → Re-sync the sheet's readers with the channel members
     @bot reset        → Backup & reset this channel's sheet
     @bot clear cache  → Clear in-memory caches
     """
@@ -175,6 +230,29 @@ def handle_mention(event, client, say, logger):
 
         threading.Thread(target=run_reset, daemon=True).start()
 
+    elif cleaned in ("share", "sync", "共有"):
+        say(f":arrows_counterclockwise: `#{channel_name}` の共有設定をメンバーに合わせます...")
+
+        def run_share():
+            try:
+                granted, _ = _sync_access(client, channel_id, channel_name)
+                emails = get_member_emails(client, channel_id)
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=(
+                        f":white_check_mark: `#{channel_name}` の共有を更新しました。"
+                        f"\n新たに共有: {granted} 件 / 共有対象のメンバー: {len(emails)} 人"
+                    ),
+                )
+            except Exception as e:
+                logger.error(f"Share sync failed: {e}")
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f":x: 共有の更新でエラーが発生しました: {e}",
+                )
+
+        threading.Thread(target=run_share, daemon=True).start()
+
     elif cleaned in ("clear cache", "cache clear", "キャッシュクリア"):
         sheets.clear_cache()
         say(":broom: キャッシュをクリアしました。")
@@ -195,6 +273,7 @@ def handle_mention(event, client, say, logger):
             f"• `@Log Bot url` — スプレッドシートURL表示\n"
             f"• `@Log Bot backfill` — 過去90日分のログを収集\n"
             f"• `@Log Bot backfill 30` — 過去N日分を収集\n"
+            f"• `@Log Bot share` — 共有設定をメンバーに合わせて更新\n"
             f"• `@Log Bot reset` — このチャンネルのシートをバックアップ＆リセット\n"
             f"• `@Log Bot clear cache` — キャッシュクリア"
         )

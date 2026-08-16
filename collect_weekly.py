@@ -84,8 +84,17 @@ def collect(channel_filter: str | None = None, days: int = 8):
         logger.info(f"Collecting #{ch_name} [{label}] (past {days} days)...")
 
         # Get member emails for private channels
-        # Every channel's sheet is shared with that channel's members.
+        # Every channel's sheet is shared with that channel's members. Joins are
+        # normally picked up live, but a weekly pass catches anything the bot
+        # missed while it was down.
         member_emails = get_member_emails(client, ch_id)
+        try:
+            granted, _ = sheets.sync_channel_access(ch_name, member_emails)
+            granted += drive.sync_channel_access(ch_name, member_emails)[0]
+            if granted:
+                logger.info(f"  #{ch_name}: shared with {granted} new member(s)")
+        except Exception as e:
+            logger.warning(f"  #{ch_name}: could not sync access: {e}")
 
         # Attachments of messages already recorded would be downloaded and
         # re-uploaded on every run: the rows get deduped at write time, the

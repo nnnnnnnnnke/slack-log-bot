@@ -108,6 +108,11 @@ def build_permalink(
     return link
 
 
+def invalidate_members(channel_id: str):
+    """Drop the cached member list so the next read reflects a join or leave."""
+    _member_emails_cache.pop(channel_id, None)
+
+
 def get_member_emails(client, channel_id: str) -> list[str]:
     """Get Google-compatible email addresses for all members of a channel.
 

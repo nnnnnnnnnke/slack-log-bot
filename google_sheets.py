@@ -15,6 +15,7 @@ from googleapiclient.discovery import build
 
 import config
 from google_auth import load_credentials
+from google_drive import sync_permissions
 from sheet_guide import ensure_guide_sheet, write_channel_index
 
 logger = logging.getLogger(__name__)
@@ -354,6 +355,13 @@ class SheetsHandler:
             except Exception as e:
                 logger.warning(f"Failed to share {spreadsheet.title} with {email}: {e}")
         return added
+
+    def sync_channel_access(
+        self, channel_name: str, member_emails: list[str], revoke: list[str] | None = None
+    ) -> tuple[int, int]:
+        """Match the channel spreadsheet's readers to the channel's membership."""
+        ss = self._get_or_create_channel_spreadsheet(channel_name, member_emails)
+        return sync_permissions(self._drive, ss.id, member_emails, revoke)
 
     def _get_or_create_channel_spreadsheet(
         self, channel_name: str, member_emails: list[str] | None = None

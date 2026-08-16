@@ -19,6 +19,63 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 ATTACHMENTS_FOLDER_NAME = "添付ファイル"
 
 
+def sync_permissions(
+    service, file_id: str, member_emails: list[str], revoke: list[str] | None = None
+) -> tuple[int, int]:
+    """Bring a file's readers in line with a channel's membership.
+
+    Returns (granted, revoked). Only readers are touched: the owner and any
+    writer stay, so a share someone set up by hand is not undone.
+
+    `revoke` is an explicit list rather than "anyone not in member_emails" —
+    a member whose email cannot be resolved would otherwise look like someone
+    to remove, and the whole channel would lose access over a failed lookup.
+    """
+    try:
+        existing = service.permissions().list(
+            fileId=file_id, fields="permissions(id,type,role,emailAddress)"
+        ).execute().get("permissions", [])
+    except Exception as e:
+        logger.warning(f"Could not read permissions for {file_id}: {e}")
+        return (0, 0)
+
+    readers = {
+        p.get("emailAddress", "").lower(): p
+        for p in existing
+        if p.get("type") == "user" and p.get("role") == "reader"
+    }
+    present = {p.get("emailAddress", "").lower() for p in existing if p.get("emailAddress")}
+
+    granted = 0
+    for email in member_emails:
+        if email.lower() in present:
+            continue
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "user", "role": "reader", "emailAddress": email},
+                sendNotificationEmail=False,
+            ).execute()
+            granted += 1
+        except Exception as e:
+            logger.warning(f"Failed to share {file_id} with {email}: {e}")
+
+    revoked = 0
+    for email in revoke or []:
+        permission = readers.get(email.lower())
+        if not permission:
+            continue
+        try:
+            service.permissions().delete(
+                fileId=file_id, permissionId=permission["id"]
+            ).execute()
+            revoked += 1
+        except Exception as e:
+            logger.warning(f"Failed to revoke {email} on {file_id}: {e}")
+
+    return (granted, revoked)
+
+
 class DriveHandler:
     def __init__(self):
         self.service = build("drive", "v3", credentials=load_credentials())
@@ -127,6 +184,13 @@ class DriveHandler:
 
         self._channel_folders[channel_name] = folder_id
         return folder_id
+
+    def sync_channel_access(
+        self, channel_name: str, member_emails: list[str], revoke: list[str] | None = None
+    ) -> tuple[int, int]:
+        """Match the channel folder's readers to the channel's membership."""
+        folder_id = self._get_or_create_channel_folder(channel_name, member_emails)
+        return sync_permissions(self.service, folder_id, member_emails, revoke)
 
     def upload_file(
         self,
