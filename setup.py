@@ -246,7 +246,21 @@ def check_slack(env: dict[str, str]) -> dict[str, str]:
             fail("スコープ不足のため中断しました。")
         ok(f"必要なスコープ {len(REQUIRED_SLACK_SCOPES)} 個すべてを確認")
 
-    return env, workspace
+    channels = {}
+    try:
+        cursor = None
+        while True:
+            listing = WebClient(token=env["SLACK_BOT_TOKEN"]).conversations_list(
+                types="public_channel,private_channel", limit=200, cursor=cursor
+            )
+            channels.update({c["id"]: c["name"] for c in listing["channels"]})
+            cursor = listing.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+    except Exception as e:
+        warn(f"チャンネル一覧を取得できませんでした: {e}")
+
+    return env, workspace, channels
 
 
 # ── Step 2: Google OAuth2 ──
@@ -369,7 +383,58 @@ def organise_attachment_folders(drive, root_folder_id: str) -> int:
     return moved
 
 
-def provision_google_resources(env: dict[str, str], workspace: str) -> dict[str, str]:
+def stamp_channel_ids(drive, env: dict[str, str], channels: dict[str, str]) -> int:
+    """Record each channel's id on the files that hold its log.
+
+    The bot stamps a file the first time it touches that channel, which can be
+    a long wait for a quiet one — and until then a rename leaves the file
+    unfindable, because the only handle on it is the name that just changed.
+    Doing every channel up front closes that window.
+    """
+    from google_drive import CHANNEL_ID_PROPERTY
+
+    stamped = 0
+    wanted = {}
+    for channel_id, name in channels.items():
+        wanted[f"Slack Log - #{name}"] = channel_id
+        wanted[f"#{name}"] = channel_id
+
+    query = f"'{env['GOOGLE_DRIVE_FOLDER_ID']}' in parents and trashed = false"
+    files = drive.files().list(
+        q=query, fields="files(id, name, appProperties)", pageSize=1000
+    ).execute().get("files", [])
+
+    # Channel folders live one level down, under the attachments folder.
+    attachments = next(
+        (f for f in files if f["name"] == ATTACHMENTS_FOLDER_NAME), None
+    )
+    if attachments:
+        files += drive.files().list(
+            q=f"'{attachments['id']}' in parents and trashed = false",
+            fields="files(id, name, appProperties)", pageSize=1000,
+        ).execute().get("files", [])
+
+    for meta in files:
+        channel_id = wanted.get(meta["name"])
+        if not channel_id:
+            continue
+        if meta.get("appProperties", {}).get(CHANNEL_ID_PROPERTY) == channel_id:
+            continue
+        try:
+            drive.files().update(
+                fileId=meta["id"],
+                body={"appProperties": {CHANNEL_ID_PROPERTY: channel_id}},
+                fields="id",
+            ).execute()
+            stamped += 1
+        except Exception as e:
+            warn(f"{meta['name']} にチャンネルIDを付与できませんでした: {e}")
+    return stamped
+
+
+def provision_google_resources(
+    env: dict[str, str], workspace: str, channels: dict[str, str] | None = None,
+) -> dict[str, str]:
     import gspread
     from googleapiclient.discovery import build
 
@@ -426,6 +491,13 @@ def provision_google_resources(env: dict[str, str], workspace: str) -> dict[str,
         warn(f"説明タブを作成できませんでした: {e}")
 
     try:
+        stamped = stamp_channel_ids(drive, env, channels or {})
+        if stamped:
+            ok(f"{stamped} 件にチャンネルIDを付与（リネーム追従のため）")
+    except Exception as e:
+        warn(f"チャンネルIDを付与できませんでした: {e}")
+
+    try:
         moved = organise_attachment_folders(drive, folder_id)
         if moved:
             ok(f"添付フォルダ {moved} 件を「{ATTACHMENTS_FOLDER_NAME}」にまとめました")
@@ -473,12 +545,12 @@ def main():
     print("\033[1mSlack Log Bot セットアップ\033[0m")
 
     env = read_env()
-    env, workspace = check_slack(env)
+    env, workspace, channels = check_slack(env)
     write_env(env)
 
     run_google_auth(reauth=args.reauth)
 
-    env = provision_google_resources(env, workspace)
+    env = provision_google_resources(env, workspace, channels)
     write_env(env)
 
     verify(env)
