@@ -79,6 +79,8 @@ settings:
       # チャンネル名変更 → スプレッドシート/フォルダ名を追従
       - channel_rename
       - group_rename
+      # 表示名の変更 → 記録済みの行にも反映
+      - user_change
   interactivity:
     is_enabled: false
   org_deploy_enabled: false

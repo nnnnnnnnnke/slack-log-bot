@@ -52,6 +52,15 @@ def _retry(fn, *args, idempotent: bool = True, **kwargs):
             delay *= 2
 
 
+def _column_letter(index: int) -> str:
+    """1-indexed column number to its spreadsheet letter."""
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
 def _appended_row_number(response) -> int | None:
     """Extract the row number a write landed on from a Sheets API response.
 
@@ -584,6 +593,115 @@ class SheetsHandler:
                 assignments[display_name] = nxt
                 self._save_color_assignments(assignments)
             return USER_COLORS[assignments[display_name] % len(USER_COLORS)]
+
+    def rename_author(self, old_name: str, new_name: str) -> int:
+        """Rewrite an author's name across every channel sheet.
+
+        Slack shows a renamed person's current name on their old messages, so
+        the log follows suit rather than leaving the sheet a mix of both. Rows
+        carry no user id, so they are matched on the name they were written
+        with — the cached one, before it changed.
+        """
+        if not old_name or not new_name or old_name == new_name:
+            return 0
+
+        with self._lock:
+            # Keep their colour: the assignment is keyed by name, and a rename
+            # would otherwise read as a new person and take the next free one.
+            assignments = self._load_color_assignments()
+            if old_name in assignments and new_name not in assignments:
+                assignments[new_name] = assignments.pop(old_name)
+                self._save_color_assignments(assignments)
+
+            updated = 0
+            for spreadsheet, worksheet in self._each_channel_sheet():
+                try:
+                    names = _retry(worksheet.col_values, USERNAME_COLUMN)
+                except Exception as e:
+                    logger.warning(f"Could not read names in {spreadsheet.title}: {e}")
+                    continue
+                rows = [i + 1 for i, name in enumerate(names) if i and name == old_name]
+                if not rows:
+                    continue
+                try:
+                    _retry(
+                        worksheet.batch_update,
+                        [{"range": f"{_column_letter(USERNAME_COLUMN)}{r}",
+                          "values": [[new_name]]} for r in rows],
+                        value_input_option="RAW", idempotent=False,
+                    )
+                    updated += len(rows)
+                except Exception as e:
+                    logger.warning(f"Could not rename in {spreadsheet.title}: {e}")
+            if updated:
+                logger.info(f"Renamed {old_name} -> {new_name} in {updated} row(s)")
+            self._last_author.clear()
+            return updated
+
+    def _each_channel_sheet(self):
+        """Every channel spreadsheet in the folder, with its first worksheet."""
+        query = (
+            f"'{self.drive_folder_id}' in parents and "
+            f"mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        )
+        try:
+            files = self._drive.files().list(
+                q=query, fields="files(id, name)", pageSize=1000
+            ).execute().get("files", [])
+        except Exception as e:
+            logger.warning(f"Could not list channel spreadsheets: {e}")
+            return
+        for meta in files:
+            if not meta["name"].startswith("Slack Log - #"):
+                continue
+            try:
+                spreadsheet = self.gc.open_by_key(meta["id"])
+                yield spreadsheet, spreadsheet.sheet1
+            except Exception as e:
+                logger.warning(f"Could not open {meta['name']}: {e}")
+
+    def update_message(
+        self, channel_name: str, ts: str, text: str,
+        member_emails: list[str] | None = None, channel_id: str = "",
+    ) -> bool:
+        """Replace a recorded message's text after it was edited in Slack."""
+        with self._lock:
+            worksheet = self._get_worksheet(channel_name, member_emails, channel_id)
+            spreadsheet = self._get_spreadsheet(channel_name)
+            try:
+                stamps = _retry(worksheet.col_values, TS_COLUMN)
+            except Exception as e:
+                logger.warning(f"Could not read timestamps in #{channel_name}: {e}")
+                return False
+
+            row_number = next(
+                (i + 1 for i, value in enumerate(stamps) if i and value == ts), None
+            )
+            if row_number is None:
+                return False
+
+            # A parent keeps its reply count; that suffix belongs to the sheet,
+            # not to the message, and the edit did not remove the replies.
+            try:
+                current = _retry(worksheet.cell, row_number, MESSAGE_COLUMN).value or ""
+            except Exception:
+                current = ""
+            match = REPLY_COUNT_PATTERN.search(current)
+            wanted = text + (match.group(0) if match else "")
+
+            try:
+                _retry(
+                    worksheet.update_cell, row_number, MESSAGE_COLUMN, wanted,
+                    idempotent=False,
+                )
+                _retry(spreadsheet.batch_update, {"requests": self._row_height_requests(
+                    worksheet.id, row_number, [wanted]
+                )})
+            except Exception as e:
+                logger.warning(f"Could not update the edited message: {e}")
+                return False
+            logger.info(f"Updated an edited message in #{channel_name} (ts={ts})")
+            return True
 
     def author_style_requests(
         self, sheet_id: int, start_row: int, authors: list[str],

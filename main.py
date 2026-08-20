@@ -14,6 +14,7 @@ from google_sheets import SheetsHandler
 from google_drive import DriveHandler
 from collector import fetch_channel_messages
 from slack_utils import (
+    _user_info_cache,
     get_channel_info,
     get_member_emails,
     get_user_info,
@@ -21,6 +22,7 @@ from slack_utils import (
     install_retry_handlers,
     invalidate_channel,
     invalidate_members,
+    invalidate_user,
 )
 
 logging.basicConfig(
@@ -74,7 +76,10 @@ def process_files(
 @app.event("message")
 def handle_message(event, client, logger):
     subtype = event.get("subtype")
-    if subtype in ("bot_message", "message_changed", "message_deleted", "channel_join", "channel_leave"):
+    if subtype == "message_changed":
+        handle_message_edited(event, client, logger)
+        return
+    if subtype in ("bot_message", "message_deleted", "channel_join", "channel_leave"):
         return
 
     channel_id = event.get("channel", "")
@@ -119,6 +124,61 @@ def handle_message(event, client, logger):
                 )
 
         threading.Thread(target=upload_files, daemon=True).start()
+
+
+def handle_message_edited(event, client, logger):
+    """Follow an edit made in Slack, so the row keeps saying what the message says."""
+    edited = event.get("message") or {}
+    ts = edited.get("ts", "")
+    author = edited.get("user", "")
+    if not ts or not author or author in bot_user_ids(client):
+        return
+
+    channel_id = event.get("channel", "")
+    channel_name = get_channel_info(client, channel_id)["name"]
+    try:
+        sheets.update_message(
+            channel_name,
+            ts,
+            resolve_mentions(client, edited.get("text", "")),
+            get_member_emails(client, channel_id),
+            channel_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to apply an edit in #{channel_name}: {e}")
+
+
+@app.event("user_change")
+def handle_user_change(event, client, logger):
+    """Follow a display name change across the rows already written.
+
+    Slack shows a renamed person's current name on their old messages; leaving
+    the sheet on the old one would split one person into two, each with their
+    own colour.
+    """
+    user = event.get("user") or {}
+    user_id = user.get("id", "")
+    if not user_id:
+        return
+
+    previous = _user_info_cache.get(user_id)
+    invalidate_user(user_id)
+    if previous is None:
+        return
+
+    old_name = previous[0]
+    new_name, _, _ = get_user_info(client, user_id)
+    if not new_name or new_name == old_name:
+        return
+
+    def run_rename():
+        try:
+            rows = sheets.rename_author(old_name, new_name)
+            logger.info(f"Display name {old_name} -> {new_name} ({rows} row(s))")
+        except Exception as e:
+            logger.error(f"Failed to follow the rename of {user_id}: {e}")
+
+    threading.Thread(target=run_rename, daemon=True).start()
 
 
 @app.event("file_shared")

@@ -120,6 +120,11 @@ def resolve_mentions(client, text: str) -> str:
     return text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
 
 
+def invalidate_user(user_id: str):
+    """Drop a cached profile so a renamed person is re-read on next use."""
+    _user_info_cache.pop(user_id, None)
+
+
 def invalidate_channel(channel_id: str):
     """Drop the cached name so a rename is picked up without a restart."""
     _channel_info_cache.pop(channel_id, None)
