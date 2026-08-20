@@ -28,10 +28,11 @@ _ALL_DRIVES_METHODS = {
 class _AllDrives:
     """A Drive collection that passes the shared-drive flags on every call."""
 
-    def __init__(self, inner, methods: set[str], is_files: bool):
+    def __init__(self, inner, methods: set[str], is_files: bool, drive_id: str = ""):
         self._inner = inner
         self._methods = methods
         self._is_files = is_files
+        self._drive_id = drive_id
 
     def __getattr__(self, name):
         method = getattr(self._inner, name)
@@ -42,6 +43,14 @@ class _AllDrives:
             kwargs.setdefault("supportsAllDrives", True)
             if name == "list" and self._is_files:
                 kwargs.setdefault("includeItemsFromAllDrives", True)
+                if self._drive_id:
+                    # Naming the drive is the documented way to search one.
+                    # A parent clause alone runs against the default corpus,
+                    # which need not reach into a shared drive — and a search
+                    # that comes back empty reads as "not created yet", so the
+                    # bot builds a second spreadsheet beside the first.
+                    kwargs.setdefault("corpora", "drive")
+                    kwargs.setdefault("driveId", self._drive_id)
             return method(**kwargs)
 
         return call
@@ -52,9 +61,16 @@ class _DriveService:
 
     def __init__(self, service):
         self._service = service
+        self._drive_id = ""
+
+    def bind_drive(self, drive_id: str | None):
+        """Search inside this shared drive from here on. None for My Drive."""
+        self._drive_id = drive_id or ""
 
     def files(self):
-        return _AllDrives(self._service.files(), _ALL_DRIVES_METHODS["files"], True)
+        return _AllDrives(
+            self._service.files(), _ALL_DRIVES_METHODS["files"], True, self._drive_id
+        )
 
     def permissions(self):
         return _AllDrives(
@@ -176,6 +192,7 @@ class DriveHandler:
         self.service = drive_service()
         self.root_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
         self.shared_drive_id = shared_drive_id(self.service, self.root_folder_id)
+        self.service.bind_drive(self.shared_drive_id)
         if self.shared_drive_id:
             logger.info(
                 "Attachments live in a shared drive; who can read them is the "

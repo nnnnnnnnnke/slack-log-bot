@@ -506,6 +506,149 @@ def ask_parent_folder(drive) -> str | None:
     return meta["id"]
 
 
+def check_drive(target: str) -> bool:
+    """Try, on a real folder, everything the bot will need to do there.
+
+    A shared drive can refuse the bot for several unrelated reasons — the
+    account is not a member, or is one with too weak a role, or the domain
+    does not allow members from outside it. Each surfaces as a different
+    failure at a different point of the setup. Doing all of it up front, on
+    throwaway files, turns that into one answer before anything is built.
+    """
+    import io
+
+    from googleapiclient.http import MediaIoBaseUpload
+
+    from google_drive import FOLDER_MIME, drive_service
+
+    print("[1m保存先の事前チェック[0m")
+
+    try:
+        creds = google_auth.load_credentials()
+    except Exception as e:
+        fail(f"Google の認証がまだです（{e}）\n  先に `python setup.py` の Step 2 を通してください。")
+    drive = drive_service(creds)
+
+    match = re.search(r"/folders/([A-Za-z0-9_-]+)", target)
+    folder_id = match.group(1) if match else target.split("?")[0].strip("/")
+
+    try:
+        meta = drive.files().get(
+            fileId=folder_id, fields="id,name,mimeType,driveId,capabilities"
+        ).execute()
+    except Exception as e:
+        fail(
+            f"フォルダを開けませんでした: {e}\n"
+            f"  この Google アカウントがフォルダのメンバーになっているか確認してください。"
+        )
+    if meta.get("mimeType") != FOLDER_MIME:
+        fail("フォルダではありません。フォルダの URL を指定してください。")
+
+    drive_id = meta.get("driveId")
+    drive.bind_drive(drive_id)
+    where = "共有ドライブ内" if drive_id else "マイドライブ内"
+    ok(f"フォルダを開けました: {meta['name']}（{where}）")
+    if not drive_id:
+        warn("共有ドライブではないため、ファイルの所有者はこのアカウントのままになります。")
+
+    created: list[str] = []
+    problems: list[str] = []
+
+    def attempt(label: str, action, hint: str):
+        try:
+            result = action()
+            ok(f"{label}")
+            return result
+        except Exception as e:
+            print(f"  \033[31m✗\033[0m {label}")
+            print(f"      {e}")
+            problems.append(hint)
+            return None
+
+    try:
+        folder = attempt(
+            "フォルダの作成",
+            lambda: drive.files().create(
+                body={"name": "__slack-log-bot-check__", "mimeType": FOLDER_MIME,
+                      "parents": [folder_id]},
+                fields="id",
+            ).execute(),
+            "フォルダを作れません。権限が「閲覧者」になっていないか確認してください。",
+        )
+        if folder:
+            created.append(folder["id"])
+
+        parent = folder["id"] if folder else folder_id
+
+        import gspread
+        sheet = attempt(
+            "スプレッドシートの作成",
+            lambda: gspread.authorize(creds).create("__slack-log-bot-check__", folder_id=parent),
+            "スプレッドシートを作れません。",
+        )
+        if sheet:
+            created.append(sheet.id)
+
+        upload = attempt(
+            "ファイルのアップロード（添付ファイル用）",
+            lambda: drive.files().create(
+                body={"name": "__slack-log-bot-check__.txt", "parents": [parent]},
+                media_body=MediaIoBaseUpload(io.BytesIO(b"check"), mimetype="text/plain"),
+                fields="id",
+            ).execute(),
+            "ファイルをアップロードできません。",
+        )
+        if upload:
+            created.append(upload["id"])
+
+        if upload:
+            attempt(
+                "ゴミ箱への移動（削除されたメッセージの添付を片付ける）",
+                lambda: drive.files().update(
+                    fileId=upload["id"], body={"trashed": True}
+                ).execute(),
+                "ゴミ箱に移せません。権限を「コンテンツ管理者」以上にしてください。",
+            )
+
+        if folder:
+            found = attempt(
+                "作ったものを検索で見つけられるか",
+                lambda: drive.files().list(
+                    q=f"'{parent}' in parents and trashed = false",
+                    fields="files(id,name)", pageSize=10,
+                ).execute().get("files", []),
+                "検索が効きません。既存のシートを作り直してしまう恐れがあります。",
+            )
+            if found is not None and not found:
+                print("  \033[31m✗\033[0m 検索が空を返しました")
+                problems.append("検索が空を返します。作ったばかりのファイルが見つかりません。")
+    finally:
+        for file_id in reversed(created):
+            try:
+                drive.files().delete(fileId=file_id).execute()
+            except Exception:
+                try:
+                    drive.files().update(fileId=file_id, body={"trashed": True}).execute()
+                except Exception:
+                    warn(f"後片付けに失敗しました。手で削除してください: {file_id}")
+
+    print()
+    if problems:
+        print("\033[1;31m足りない権限があります\033[0m")
+        for hint in dict.fromkeys(problems):
+            print(f"  - {hint}")
+        print()
+        print("  共有ドライブ側で、この Google アカウントを")
+        print("  \033[1m「コンテンツ管理者」\033[0m以上として追加してください。")
+        print("  組織外のアカウントを追加できない設定になっている可能性もあります。")
+        return False
+
+    print("\033[1;32mすべて通りました\033[0m")
+    print(f"  このフォルダを保存先にできます: {folder_id}")
+    print("  `python setup.py --profile <名前>` の Step 3 でこの URL を貼ってください。")
+    return True
+
+
 def provision_google_resources(
     env: dict[str, str], workspace: str, channels: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -539,7 +682,9 @@ def provision_google_resources(
         print(f"      https://drive.google.com/drive/folders/{folder_id}")
 
     folder_id = env["GOOGLE_DRIVE_FOLDER_ID"]
-    in_shared_drive = bool(shared_drive_id(drive, folder_id))
+    drive_id = shared_drive_id(drive, folder_id)
+    drive.bind_drive(drive_id)
+    in_shared_drive = bool(drive_id)
     if in_shared_drive:
         ok("保存先は共有ドライブです")
         print("      ファイルの所有者は共有ドライブ（組織）になります。")
@@ -624,6 +769,10 @@ def verify(env: dict[str, str]):
 def main():
     parser = argparse.ArgumentParser(description="Slack Log Bot セットアップ")
     parser.add_argument(
+        "--check-drive", metavar="URL", default="",
+        help="保存先フォルダに必要な権限があるか、実際に作って消して確かめる",
+    )
+    parser.add_argument(
         "--profile", metavar="NAME", default="",
         help="複数の bot を1つのチェックアウトで動かす場合の名前"
              "（例: --profile leaders → profiles/leaders/ 配下に設定を作る）",
@@ -637,6 +786,11 @@ def main():
              "（ヘッドレス機で SSH ポートフォワードを使う場合）",
     )
     args = parser.parse_args()
+
+    if args.check_drive:
+        if args.profile:
+            apply_profile(args.profile)
+        sys.exit(0 if check_drive(args.check_drive) else 1)
 
     if args.profile:
         apply_profile(args.profile)

@@ -250,6 +250,7 @@ class SheetsHandler:
         # A shared drive answers "who can read this" on its own, so the
         # per-channel sharing below stands down when the logs live in one.
         self.shared_drive_id = shared_drive_id(self._drive, self.drive_folder_id)
+        self._drive.bind_drive(self.shared_drive_id)
         self._sheet_cache: dict[str, gspread.Worksheet] = {}
         self._existing_ts: dict[str, set[str]] = {}
         self._channel_spreadsheets: dict[str, gspread.Spreadsheet] = {}
