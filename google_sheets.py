@@ -772,15 +772,62 @@ class SheetsHandler:
             self._repair_after_removal(worksheet, spreadsheet, row_number)
             return True
 
+    def _half_open_group_requests(
+        self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet
+    ) -> list[dict]:
+        """Re-fold a thread that a row removal left half open.
+
+        Sheets keeps a group's range in step as rows are deleted, but a group
+        worn down to a single row comes back reporting itself expanded while
+        its row stays hidden: no +/- to press, and a reply that is simply
+        missing. Only groups in that contradictory state are touched, so a
+        thread someone opened by hand stays open.
+        """
+        try:
+            response = _retry(
+                self.gc.http_client.request, "get",
+                f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet.id}",
+                params={
+                    "ranges": f"'{worksheet.title}'",
+                    "fields": "sheets(properties.sheetId,rowGroups,"
+                              "data.rowMetadata.hiddenByUser)",
+                },
+            ).json()
+            sheet = next(
+                s for s in response["sheets"]
+                if s["properties"]["sheetId"] == worksheet.id
+            )
+        except Exception as e:
+            logger.warning(f"Could not check the thread groups: {e}")
+            return []
+
+        hidden = {
+            index for index, meta
+            in enumerate(sheet.get("data", [{}])[0].get("rowMetadata", []))
+            if meta.get("hiddenByUser")
+        }
+        requests = []
+        for group in sheet.get("rowGroups", []):
+            if group.get("collapsed"):
+                continue
+            span = group["range"]
+            rows = range(span["startIndex"], span["endIndex"])
+            if any(row in hidden for row in rows):
+                requests.append(self._collapse_group_request(
+                    worksheet.id, span["startIndex"] + 1, span["endIndex"] + 1
+                ))
+        return requests
+
     def _repair_after_removal(
         self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
         row_number: int,
     ):
         """Put right what the removed row was carrying.
 
-        Two things outlive it. A parent's reply count is one more than the
-        thread now has, and the rule that marks a change of speaker was drawn
-        against a neighbour that is no longer there.
+        Three things outlive it. A parent's reply count is one more than the
+        thread now has, the rule that marks a change of speaker was drawn
+        against a neighbour that is no longer there, and a thread worn down
+        to one reply comes back half folded.
         """
         # Cosmetic, and it runs after the row is already gone, so nothing here
         # is allowed to raise into the caller and report a failed deletion.
@@ -803,6 +850,13 @@ class SheetsHandler:
 
             if requests:
                 _retry(spreadsheet.batch_update, {"requests": requests})
+
+            # Its own batch: updateDimensionGroup insists on an exact range
+            # match, and a miss would take the rest of the tidy-up with it.
+            folds = self._half_open_group_requests(worksheet, spreadsheet)
+            if folds:
+                _retry(spreadsheet.batch_update, {"requests": folds})
+                logger.info(f"Re-folded {len(folds)} thread(s) after the removal")
         except Exception as e:
             logger.warning(f"Could not tidy up after the removed row: {e}")
 
