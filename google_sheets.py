@@ -177,10 +177,10 @@ COLOR_AUTHOR_RULE = {"red": 0.75, "green": 0.75, "blue": 0.75}    # #bfbfbf
 #
 # Colours are handed out in order of first appearance and remembered, not
 # hashed: hashing into N slots still collides by the birthday problem — with
-# 20 people and 100 colours, two of them share a colour more often than not.
+# 20 people and 50 colours, two of them share a colour more often than not.
 USER_COLOR_HUE_RANGES = [(0, 89), (161, 359)]
 USER_COLOR_HUES = 25
-USER_COLOR_TIERS = [(0.35, 0.92), (0.60, 0.90), (0.35, 0.85), (0.60, 0.83)]
+USER_COLOR_TIERS = [(0.35, 0.92), (0.60, 0.83)]
 
 
 def _build_user_palette() -> list[dict]:
@@ -772,17 +772,16 @@ class SheetsHandler:
         except Exception as e:
             logger.warning(f"Failed to style authors: {e}")
 
-    def thread_group_requests(
-        self, sheet_id: int, start_row: int, rows_data: list[dict]
-    ) -> list[dict]:
-        """Outline groups over each thread's replies, so a thread can be folded.
+    @staticmethod
+    def _thread_runs(start_row: int, rows_data: list[dict]) -> list[tuple[int, int]]:
+        """(first_row, after_row) for each run of consecutive reply rows.
 
-        A group covers only the replies, never the parent: collapsing hides the
+        A run covers only the replies, never the parent: collapsing hides the
         replies and leaves the message they answer in view. Runs are built from
-        consecutive reply rows, which is how a thread is written — parent first,
-        then its replies.
+        consecutive reply rows, which is how a thread is written — parent
+        first, then its replies.
         """
-        requests = []
+        runs = []
         run_start = None
         for offset, msg in enumerate(rows_data):
             is_reply = bool(msg.get("thread_ts")) and msg.get("thread_ts") != msg.get("ts")
@@ -790,49 +789,94 @@ class SheetsHandler:
                 if run_start is None:
                     run_start = start_row + offset
             elif run_start is not None:
-                requests.extend(self._group_request(sheet_id, run_start, start_row + offset))
+                runs.append((run_start, start_row + offset))
                 run_start = None
         if run_start is not None:
-            requests.extend(
-                self._group_request(sheet_id, run_start, start_row + len(rows_data))
-            )
-        return requests
+            runs.append((run_start, start_row + len(rows_data)))
+        return runs
+
+    def thread_group_requests(
+        self, sheet_id: int, start_row: int, rows_data: list[dict]
+    ) -> list[dict]:
+        """Outline groups over each thread's replies, so a thread can be folded."""
+        return [
+            self._add_group_request(sheet_id, first, after)
+            for first, after in self._thread_runs(start_row, rows_data)
+        ]
 
     @staticmethod
-    def _group_request(sheet_id: int, first_row: int, after_row: int) -> list[dict]:
-        """Create the group, then fold it.
-
-        Two requests rather than one: addDimensionGroup has no collapsed field,
-        and a thread left open takes as much room as the channel around it —
-        which is what the folding was for.
-        """
-        span = {
+    def _group_span(sheet_id: int, first_row: int, after_row: int) -> dict:
+        return {
             "sheetId": sheet_id,
             "dimension": "ROWS",
             "startIndex": first_row - 1,   # 1-indexed row -> 0-indexed
             "endIndex": after_row - 1,
         }
-        return [
-            {"addDimensionGroup": {"range": span}},
-            {
-                "updateDimensionGroup": {
-                    "dimensionGroup": {"range": span, "depth": 1, "collapsed": True},
-                    "fields": "collapsed",
-                }
-            },
-        ]
+
+    @classmethod
+    def _add_group_request(cls, sheet_id: int, first_row: int, after_row: int) -> dict:
+        return {"addDimensionGroup": {"range": cls._group_span(sheet_id, first_row, after_row)}}
+
+    @classmethod
+    def _collapse_group_request(cls, sheet_id: int, first_row: int, after_row: int) -> dict:
+        return {
+            "updateDimensionGroup": {
+                "dimensionGroup": {
+                    "range": cls._group_span(sheet_id, first_row, after_row),
+                    "depth": 1,
+                    "collapsed": True,
+                },
+                "fields": "collapsed",
+            }
+        }
+
+    def _collapse_groups(
+        self, spreadsheet: gspread.Spreadsheet, sheet_id: int,
+        runs: list[tuple[int, int]],
+    ):
+        """Fold thread groups, in a batch of their own.
+
+        Never in the batch that creates them. addDimensionGroup silently
+        merges a new group into an adjacent one, while updateDimensionGroup
+        insists on an exact range match — so the collapse can name a range
+        that no longer exists. batch_update is atomic, and sharing a batch
+        would take the group creation and the row formatting down with it.
+
+        A range that fails to match is a group that got merged, and a merge
+        inherits the collapsed state of what it merged into, so there is
+        nothing left to do for it.
+        """
+        if not runs:
+            return
+        requests = [self._collapse_group_request(sheet_id, a, b) for a, b in runs]
+        try:
+            _retry(spreadsheet.batch_update, {"requests": requests})
+            return
+        except Exception as e:
+            logger.debug(f"Collapsing thread groups together failed: {e}")
+        # One bad range rejects the whole batch, so retry them individually
+        # rather than leaving every other thread on this sheet open.
+        for request in requests:
+            try:
+                _retry(spreadsheet.batch_update, {"requests": [request]})
+            except Exception as e:
+                logger.debug(f"Thread group left open: {e}")
 
     def apply_thread_groups(
         self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
         start_row: int, rows_data: list[dict],
     ):
-        requests = self.thread_group_requests(worksheet.id, start_row, rows_data)
-        if not requests:
+        runs = self._thread_runs(start_row, rows_data)
+        if not runs:
             return
         try:
-            _retry(spreadsheet.batch_update, {"requests": requests})
+            _retry(spreadsheet.batch_update, {"requests": [
+                self._add_group_request(worksheet.id, a, b) for a, b in runs
+            ]})
         except Exception as e:
             logger.warning(f"Failed to group thread replies: {e}")
+            return
+        self._collapse_groups(spreadsheet, worksheet.id, runs)
 
     def _format_thread_rows(
         self,
@@ -1278,10 +1322,12 @@ class SheetsHandler:
 
             is_thread_reply = thread_ts and thread_ts != ts
             inserted_row = None
+            first_reply = False
 
             if is_thread_reply:
-                insert_pos = self._find_thread_insert_position(worksheet, thread_ts)
-                if insert_pos:
+                found = self._find_thread_insert_position(worksheet, thread_ts)
+                if found:
+                    insert_pos, first_reply = found
                     _retry(
                         worksheet.insert_row, row, insert_pos,
                         value_input_option="RAW", idempotent=False,
@@ -1295,6 +1341,7 @@ class SheetsHandler:
                         value_input_option="RAW", idempotent=False,
                     )
                     inserted_row = _appended_row_number(resp)
+                    first_reply = True
             else:
                 resp = _retry(
                     worksheet.append_row, row,
@@ -1322,15 +1369,23 @@ class SheetsHandler:
                     requests.extend(
                         self._thread_background_requests(worksheet.id, inserted_row)
                     )
-                    # Re-adding a group over the row extends the thread's
-                    # existing group rather than creating a second one.
-                    requests.extend(
-                        self._group_request(worksheet.id, inserted_row, inserted_row + 1)
-                    )
+                    # Adding a group over the row merges it into the
+                    # thread's existing group rather than making a second one.
+                    requests.append(self._add_group_request(
+                        worksheet.id, inserted_row, inserted_row + 1
+                    ))
                 try:
                     _retry(spreadsheet.batch_update, {"requests": requests})
                 except Exception as e:
                     logger.warning(f"Failed to style row {inserted_row}: {e}")
+
+                # Only the thread's first reply needs folding. A later one
+                # merges into the group already there and keeps its state,
+                # including a fold the reader opened by hand.
+                if is_thread_reply and first_reply:
+                    self._collapse_groups(
+                        spreadsheet, worksheet.id, [(inserted_row, inserted_row + 1)]
+                    )
 
             existing.add(ts)
             if is_thread_reply:
@@ -1368,7 +1423,14 @@ class SheetsHandler:
         except Exception as e:
             logger.error(f"Failed to update attachment links: {e}")
 
-    def _find_thread_insert_position(self, worksheet: gspread.Worksheet, thread_ts: str) -> int | None:
+    def _find_thread_insert_position(
+        self, worksheet: gspread.Worksheet, thread_ts: str
+    ) -> tuple[int, bool] | None:
+        """Where this reply goes, and whether it is the thread's first.
+
+        The first reply is the one that creates the thread's group; the ones
+        after it merge into that group and inherit its folded state.
+        """
         try:
             all_ts = _retry(worksheet.col_values, TS_COLUMN)
             all_thread_ts = _retry(worksheet.col_values, THREAD_TS_COLUMN)
@@ -1380,12 +1442,16 @@ class SheetsHandler:
         all_thread_ts += [""] * (max_len - len(all_thread_ts))
 
         last_match_row = None
+        last_was_parent = False
         for i in range(1, max_len):
             if all_ts[i] == thread_ts or all_thread_ts[i] == thread_ts:
                 last_match_row = i + 1
+                # The parent carries the thread_ts as its own ts; a reply does
+                # not. Landing on the parent means no reply is there yet.
+                last_was_parent = all_ts[i] == thread_ts
 
         if last_match_row:
-            return last_match_row + 1
+            return last_match_row + 1, last_was_parent
         return None
 
     # ── Batch write (collect_weekly.py, backfill.py) ──
