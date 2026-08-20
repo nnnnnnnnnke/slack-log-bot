@@ -103,6 +103,14 @@ write_files:
       REPO=https://github.com/nnnnnnnnnke/slack-log-bot.git
       DEST=/home/nukui/slack-log-bot
 
+      # network-online.target は「リンクが上がった」までしか保証しない。
+      # eth0 が optional なら待たずに達成扱いになることもあり、その時点では
+      # まだ名前が引けず git clone が Could not resolve host で落ちる。
+      for _ in $(seq 1 60); do
+        getent hosts github.com >/dev/null 2>&1 && break
+        sleep 5
+      done
+
       if [ ! -d "$DEST/.git" ]; then
         sudo -u nukui git clone --depth 1 "$REPO" "$DEST"
       fi
@@ -137,6 +145,9 @@ write_files:
       RemainAfterExit=true
       ExecStart=/usr/local/sbin/slack-log-bot-install.sh
       TimeoutStartSec=1800
+      # 名前解決やネットワークが遅れて上がってきた場合の保険。
+      Restart=on-failure
+      RestartSec=60
 
       [Install]
       WantedBy=multi-user.target

@@ -1,17 +1,20 @@
 # cloud-init network-config (netplan v2)
-# slack-log-bot — 外向き接続しかしないので DHCP で足りる。
-# SSH 先を固定したい場合は dhcp4 を false にして addresses/routes を書く。
+# j59noc-slack-log — 有線のみ。外向き接続しかしないが、SSH 先を固定したいので静的。
+#
+# wifis は書かない。SSID を埋めないまま残すと、存在しないアクセスポイントへ
+# 延々と接続を試みる設定が有効なまま残る。無線を使うときだけ足す。
 version: 2
 ethernets:
   eth0:
-    dhcp4: true
+    dhcp4: false
     dhcp6: false
     accept-ra: true
+    addresses:
+      - 192.168.1.59/24
+    routes:
+      - to: default
+        via: 192.168.1.1
+    nameservers:
+      addresses: [192.168.1.1, 1.1.1.1]
+    # ケーブル未接続でも起動を止めない（ヘッドレスで復旧できなくなるため）
     optional: true
-wifis:
-  wlan0:
-    dhcp4: true
-    optional: true
-    access-points:
-      "SSID を書く":
-        password: "パスフレーズを書く"
