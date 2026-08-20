@@ -1,0 +1,159 @@
+#cloud-config
+# Slack Log Bot — Raspberry Pi 4 / Ubuntu Server (arm64)
+#
+# 認証情報はこのファイルに含めない。ブートパーティションは FAT32 で
+# パーミッションを持てず、カードを差した人なら誰でも読めるため。
+# 起動後に scp で送る（末尾の final_message を参照）。
+
+hostname: slack-log-bot
+manage_etc_hosts: localhost
+preserve_hostname: false
+# シートは JST 固定で書くが、journal と systemd タイマーはシステムTZで動く。
+timezone: Asia/Tokyo
+locale: en_US.UTF-8
+
+users:
+  - name: nukui        # 使うユーザー名に置き換える
+    passwd: "<mkpasswd -m sha-512 で生成したハッシュ>"
+    lock_passwd: false
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [adm, sudo, netdev, plugdev, dialout]
+    ssh_authorized_keys:
+      - <公開鍵をここに>
+
+ssh_pwauth: false
+chpasswd:
+  expire: false
+
+package_update: true
+package_upgrade: false
+packages:
+  - python3
+  - python3-venv
+  - python3-pip
+  - git
+  - ca-certificates
+  # ヘッドレスなので slack-log-bot.local で引けるようにしておく
+  - avahi-daemon
+
+write_files:
+  # 常駐本体。.env が無いうちは起動しない ── 認証情報を送る前に
+  # 起動すると config.py が終了し、再起動を繰り返すだけになる。
+  - path: /etc/systemd/system/slack-log-bot.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Slack Log Bot (realtime, Socket Mode)
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=/home/nukui/slack-log-bot/.env
+
+      [Service]
+      Type=simple
+      User=nukui
+      WorkingDirectory=/home/nukui/slack-log-bot
+      ExecStart=/home/nukui/slack-log-bot/.venv/bin/python main.py
+      Restart=on-failure
+      RestartSec=10
+      # Socket Mode は外向き接続のみ。待ち受けないので権限を絞れる。
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectSystem=strict
+      ProtectHome=read-only
+      ReadWritePaths=/home/nukui/slack-log-bot
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # 常駐が落ちていた間の取りこぼしを毎週回収する。
+  - path: /etc/systemd/system/slack-log-bot-weekly.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Slack Log Bot (weekly catch-up)
+      After=network-online.target
+      ConditionPathExists=/home/nukui/slack-log-bot/.env
+
+      [Service]
+      Type=oneshot
+      User=nukui
+      WorkingDirectory=/home/nukui/slack-log-bot
+      ExecStart=/home/nukui/slack-log-bot/.venv/bin/python collect_weekly.py
+
+  - path: /etc/systemd/system/slack-log-bot-weekly.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Run the weekly catch-up
+
+      [Timer]
+      OnCalendar=Mon *-*-* 09:00:00
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /usr/local/sbin/slack-log-bot-install.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # クローンと venv 構築。初回起動時に一度だけ走る。
+      set -euo pipefail
+      REPO=https://github.com/nnnnnnnnnke/slack-log-bot.git
+      DEST=/home/nukui/slack-log-bot
+
+      if [ ! -d "$DEST/.git" ]; then
+        sudo -u nukui git clone --depth 1 "$REPO" "$DEST"
+      fi
+      cd "$DEST"
+
+      # cryptography などは arm64 のホイールが入るのでビルドは走らない。
+      # 32bit イメージだとここが Rust のソースビルドになり数十分かかる。
+      sudo -u nukui python3 -m venv .venv
+      sudo -u nukui .venv/bin/pip install --quiet --upgrade pip
+      sudo -u nukui .venv/bin/pip install --quiet -r requirements.txt
+
+      "$DEST/.venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' \
+        || { echo "Python 3.10 以上が必要です: $("$DEST/.venv/bin/python" -V)"; exit 1; }
+
+      systemctl daemon-reload
+      systemctl enable slack-log-bot.service
+      systemctl enable --now slack-log-bot-weekly.timer
+      # .env が無いうちは ConditionPathExists で止まる。届いたら起動する。
+      systemctl start slack-log-bot.service || true
+
+  - path: /etc/systemd/system/slack-log-bot-install.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Fetch the bot and build its virtualenv (first boot)
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/home/nukui/slack-log-bot/.venv/bin/python
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      ExecStart=/usr/local/sbin/slack-log-bot-install.sh
+      TimeoutStartSec=1800
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # 素のイメージで一度起動した痕跡として ubuntu ユーザが残ることがある。
+  - [ sh, -c, 'id ubuntu >/dev/null 2>&1 && userdel -r ubuntu || true' ]
+  - [ systemctl, daemon-reload ]
+  # --no-block: pip の取得に数分かかるので cloud-init を待たせない
+  - [ systemctl, enable, --no-block, --now, slack-log-bot-install.service ]
+
+final_message: |
+  slack-log-bot ready after $UPTIME seconds.
+
+    ssh nukui@slack-log-bot.local
+
+  認証情報はまだ入っていないため、bot は起動していません。手元から送ってください:
+
+    scp .env client_secret.json drive_token.json nukui@slack-log-bot.local:~/slack-log-bot/
+    ssh nukui@slack-log-bot.local 'chmod 600 ~/slack-log-bot/.env ~/slack-log-bot/*.json && sudo systemctl start slack-log-bot'

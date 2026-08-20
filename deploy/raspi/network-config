@@ -1,0 +1,17 @@
+# cloud-init network-config (netplan v2)
+# slack-log-bot — 外向き接続しかしないので DHCP で足りる。
+# SSH 先を固定したい場合は dhcp4 を false にして addresses/routes を書く。
+version: 2
+ethernets:
+  eth0:
+    dhcp4: true
+    dhcp6: false
+    accept-ra: true
+    optional: true
+wifis:
+  wlan0:
+    dhcp4: true
+    optional: true
+    access-points:
+      "SSID を書く":
+        password: "パスフレーズを書く"
