@@ -153,6 +153,17 @@ Google アカウントにのみ共有されます。
 .venv/bin/python setup.py --check-drive 'https://drive.google.com/drive/folders/xxxxx'
 ```
 
+このチェックは `.env` を書き換えません。通ったら、そのフォルダを保存先として
+セットアップします。
+
+```bash
+.venv/bin/python setup.py --profile public --parent 'https://drive.google.com/drive/folders/xxxxx'
+```
+
+> `.env` に `GOOGLE_DRIVE_FOLDER_ID` が既にあると、保存先はその値が優先され、
+> `--parent` は無視されます。保存先を移したい場合は、その行を消してから
+> 実行してください。**既に書き込まれたファイルは移動しません。**
+
 共有ドライブでは、bot の Google アカウントを**「コンテンツ管理者」以上**として
 追加してください。「投稿者」だとファイルをゴミ箱に移せず、添付の整理と
 削除されたメッセージの後片付けが動きません。

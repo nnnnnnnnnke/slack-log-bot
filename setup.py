@@ -469,7 +469,13 @@ def stamp_channel_ids(drive, env: dict[str, str], channels: dict[str, str]) -> i
     return stamped
 
 
-def ask_parent_folder(drive) -> str | None:
+def folder_id_from(raw: str) -> str:
+    """The folder id out of a Drive URL, or the id if that is what was given."""
+    match = re.search(r"/folders/([A-Za-z0-9_-]+)", raw)
+    return match.group(1) if match else raw.split("?")[0].strip("/")
+
+
+def ask_parent_folder(drive, given: str = "") -> str | None:
     """Where the bot's folder should be created, or None for My Drive.
 
     A shared drive is the reason to ask. Files made inside one belong to the
@@ -477,16 +483,16 @@ def ask_parent_folder(drive) -> str | None:
     account no longer loses the logs — but the bot cannot put a folder there
     unless it is told which one.
     """
-    print("      保存先の親フォルダがあれば、その URL か ID を貼ってください。")
-    print("      共有ドライブに置くと、ファイルの所有者が組織になります。")
-    print("      空のまま Enter を押すと、このアカウントのマイドライブに作ります。")
-    raw = input("      親フォルダ (省略可): ").strip()
+    raw = given.strip()
+    if not raw:
+        print("      保存先の親フォルダがあれば、その URL か ID を貼ってください。")
+        print("      共有ドライブに置くと、ファイルの所有者が組織になります。")
+        print("      空のまま Enter を押すと、このアカウントのマイドライブに作ります。")
+        raw = input("      親フォルダ (省略可): ").strip()
     if not raw:
         return None
 
-    # Accepts a folder URL or a bare id; a shared drive's own root works too.
-    match = re.search(r"/folders/([A-Za-z0-9_-]+)", raw)
-    folder_id = match.group(1) if match else raw.split("?")[0].strip("/")
+    folder_id = folder_id_from(raw)
 
     try:
         meta = drive.files().get(
@@ -529,8 +535,7 @@ def check_drive(target: str) -> bool:
         fail(f"Google の認証がまだです（{e}）\n  先に `python setup.py` の Step 2 を通してください。")
     drive = drive_service(creds)
 
-    match = re.search(r"/folders/([A-Za-z0-9_-]+)", target)
-    folder_id = match.group(1) if match else target.split("?")[0].strip("/")
+    folder_id = folder_id_from(target)
 
     try:
         meta = drive.files().get(
@@ -644,13 +649,16 @@ def check_drive(target: str) -> bool:
         return False
 
     print("\033[1;32mすべて通りました\033[0m")
-    print(f"  このフォルダを保存先にできます: {folder_id}")
-    print("  `python setup.py --profile <名前>` の Step 3 でこの URL を貼ってください。")
+    print("  このフォルダを保存先にするには、続けて次を実行してください。")
+    print(f"    python setup.py --profile <名前> --parent {folder_id}")
+    print()
+    print("  （このチェックは何も書き換えていません。作ったものは全部消しました）")
     return True
 
 
 def provision_google_resources(
     env: dict[str, str], workspace: str, channels: dict[str, str] | None = None,
+    parent: str = "",
 ) -> dict[str, str]:
     import gspread
 
@@ -667,11 +675,16 @@ def provision_google_resources(
     # so this keeps everything the bot owns in one place.
     if env.get("GOOGLE_DRIVE_FOLDER_ID"):
         ok(f"既存の Drive フォルダを使用: {env['GOOGLE_DRIVE_FOLDER_ID']}")
+        if parent:
+            # Moving an existing archive is not something to do as a side
+            # effect of a flag: the files already written stay where they are.
+            warn("--parent は無視しました。保存先は .env の値が優先されます。")
+            warn("  移したい場合は .env の GOOGLE_DRIVE_FOLDER_ID を消して再実行してください。")
     else:
-        parent = ask_parent_folder(drive)
+        parent_id = ask_parent_folder(drive, parent)
         folder_name = DRIVE_FOLDER_NAME.format(workspace=workspace)
         folder_id, created = find_or_create(
-            drive, folder_name, "application/vnd.google-apps.folder", parent=parent,
+            drive, folder_name, "application/vnd.google-apps.folder", parent=parent_id,
         )
         env["GOOGLE_DRIVE_FOLDER_ID"] = folder_id
         # Saved as soon as it is known. Anything created here exists in Drive
@@ -769,6 +782,10 @@ def verify(env: dict[str, str]):
 def main():
     parser = argparse.ArgumentParser(description="Slack Log Bot セットアップ")
     parser.add_argument(
+        "--parent", metavar="URL", default="",
+        help="保存先の親フォルダ（共有ドライブなど）。省略すると Step 3 で聞きます",
+    )
+    parser.add_argument(
         "--check-drive", metavar="URL", default="",
         help="保存先フォルダに必要な権限があるか、実際に作って消して確かめる",
     )
@@ -805,7 +822,7 @@ def main():
 
     run_google_auth(reauth=args.reauth, port=args.auth_port)
 
-    env = provision_google_resources(env, workspace, channels)
+    env = provision_google_resources(env, workspace, channels, args.parent)
     write_env(env)
 
     verify(env)
