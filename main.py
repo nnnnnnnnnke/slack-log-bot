@@ -298,8 +298,10 @@ def handle_mention(event, client, say, logger):
 
     channel_name = get_channel_info(client, channel_id)["name"]
 
-    # Parse command from mention text (strip bot mention)
-    cleaned = re.sub(r"<@[A-Z0-9]+>", "", text).strip().lower()
+    # Strip the mention to leave the command. Slack usually sends <@U012ABC>,
+    # but the labelled form <@U012ABC|name> also occurs; without the optional
+    # label the id stayed in the string and every command read as unknown.
+    cleaned = re.sub(r"<@[A-Za-z0-9]+(\|[^>]*)?>", "", text).strip().lower()
 
     if cleaned.startswith("backfill"):
         parts = cleaned.split()
