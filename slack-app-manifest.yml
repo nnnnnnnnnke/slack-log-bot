@@ -12,8 +12,11 @@
 ##     ※ App-Level Token だけは manifest で作れないため手動生成が必要です
 ##   - ワークスペースへのインストール … Install App → Install to Workspace
 ##
-## アプリ名を変えたい場合は display_information.name と
-## features.bot_user.display_name の両方を書き換えてください。
+## アプリ名を変えたい場合:
+##   display_information.name  … アプリ一覧やアプリ情報に出る名前。日本語も可。
+##   features.bot_user.display_name … チャンネルで発言者として出る名前。
+##     Slack がここから @username を生成するため ASCII のみ。日本語を入れると
+##     "The display_name cannot be converted to a username" で保存できません。
 
 _metadata:
   major_version: 1
@@ -40,7 +43,7 @@ display_information:
 
 features:
   bot_user:
-    display_name: Slackログ保存bot
+    display_name: slack-log-bot
     always_online: true
 
 oauth_config:
