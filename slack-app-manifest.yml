@@ -20,7 +20,7 @@ _metadata:
   minor_version: 1
 
 display_information:
-  name: Log Bot
+  name: Slackログ保存bot
   description: Slack の投稿・スレッド・添付ファイルを Google スプレッドシート/Drive に保存します
   background_color: "#1e8e3e"
   long_description: |-
@@ -38,7 +38,7 @@ display_information:
 
 features:
   bot_user:
-    display_name: Log Bot
+    display_name: Slackログ保存bot
     always_online: true
 
 oauth_config:

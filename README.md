@@ -69,10 +69,10 @@ slack_log_bot/
 
 | コマンド | 説明 |
 |----------|------|
-| `@Log Bot` / `@Log Bot help` | コマンド一覧とスプレッドシートURLを表示 |
-| `@Log Bot url` | そのチャンネルのスプレッドシートURLを表示 |
-| `@Log Bot backfill` | そのチャンネルの過去90日分のログを即座に収集 |
-| `@Log Bot backfill 30` | 過去N日分を収集（日数指定） |
+| `@Slackログ保存bot help` | コマンド一覧とスプレッドシートURLを表示 |
+| `@Slackログ保存bot url` | そのチャンネルのスプレッドシートURLを表示 |
+| `@Slackログ保存bot backfill` | そのチャンネルの過去90日分のログを即座に収集 |
+| `@Slackログ保存bot backfill 30` | 過去N日分を収集（日数指定） |
 
 ## スプレッドシートの構成
 
@@ -229,7 +229,7 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 3. 表示される **Bot User OAuth Token**（`xoxb-...`）を控えておく
 4. 記録したいチャンネルにbotを招待:
    ```
-   /invite @Log Bot
+   /invite @Slackログ保存bot
    ```
    > プライベートチャンネルにも忘れずに招待してください
 
@@ -567,7 +567,7 @@ sudo systemctl enable --now slack-log-bot-weekly.timer
 ### C. 過去メッセージの取り込み（バックフィル）
 
 初回導入時や、過去のメッセージを遡って取り込みたいときに使います。
-Slackからコマンドでも実行できます: `@Log Bot backfill`
+Slackからコマンドでも実行できます: `@Slackログ保存bot backfill`
 
 ```bash
 # 全チャンネル・過去90日分（デフォルト）
@@ -622,7 +622,7 @@ Sheets と Drive の認証が1本化される前のトークンです（Drive権
 
 ### botがチャンネルのメッセージを取得できない
 
-- botがチャンネルに招待されているか確認: `/invite @Log Bot`
+- botがチャンネルに招待されているか確認: `/invite @Slackログ保存bot`
 - プライベートチャンネルの場合、`groups:history` と `groups:read` スコープがあるか確認
 
 ### botのメンションに反応しない
