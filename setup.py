@@ -49,9 +49,12 @@ DRIVE_FOLDER_NAME = "Slack ログ - {workspace}"
 SPREADSHEET_NAME = "Slack ログ 索引 - {workspace}"
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
-# Must match google_drive.ATTACHMENTS_FOLDER_NAME (declared here too so this
-# wizard does not have to import config before .env is complete)
+# Must match google_drive.ATTACHMENTS_FOLDER_NAME and
+# google_drive.CHANNEL_ID_PROPERTY. Declared here rather than imported: those
+# modules import config, and config exits when the ids are missing — which is
+# exactly the state this wizard is in while it is still creating them.
 ATTACHMENTS_FOLDER_NAME = "添付ファイル"
+CHANNEL_ID_PROPERTY = "slackChannelId"
 
 # Scopes the bot needs; must stay in sync with slack-app-manifest.yml
 REQUIRED_SLACK_SCOPES = [
@@ -395,8 +398,6 @@ def stamp_channel_ids(drive, env: dict[str, str], channels: dict[str, str]) -> i
     unfindable, because the only handle on it is the name that just changed.
     Doing every channel up front closes that window.
     """
-    from google_drive import CHANNEL_ID_PROPERTY
-
     stamped = 0
     wanted = {}
     for channel_id, name in channels.items():
