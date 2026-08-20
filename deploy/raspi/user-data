@@ -5,7 +5,7 @@
 # パーミッションを持てず、カードを差した人なら誰でも読めるため。
 # 起動後に scp で送る（末尾の final_message を参照）。
 
-hostname: slack-log-bot
+hostname: j59noc-slack-log
 manage_etc_hosts: localhost
 preserve_hostname: false
 # シートは JST 固定で書くが、journal と systemd タイマーはシステムTZで動く。
@@ -34,7 +34,7 @@ packages:
   - python3-pip
   - git
   - ca-certificates
-  # ヘッドレスなので slack-log-bot.local で引けるようにしておく
+  # ヘッドレスなので j59noc-slack-log.local で引けるようにしておく
   - avahi-daemon
 
 write_files:
@@ -149,11 +149,11 @@ runcmd:
   - [ systemctl, enable, --no-block, --now, slack-log-bot-install.service ]
 
 final_message: |
-  slack-log-bot ready after $UPTIME seconds.
+  j59noc-slack-log ready after $UPTIME seconds.
 
-    ssh nukui@slack-log-bot.local
+    ssh nukui@j59noc-slack-log.local
 
   認証情報はまだ入っていないため、bot は起動していません。手元から送ってください:
 
-    scp .env client_secret.json drive_token.json nukui@slack-log-bot.local:~/slack-log-bot/
-    ssh nukui@slack-log-bot.local 'chmod 600 ~/slack-log-bot/.env ~/slack-log-bot/*.json && sudo systemctl start slack-log-bot'
+    scp .env client_secret.json drive_token.json nukui@j59noc-slack-log.local:~/slack-log-bot/
+    ssh nukui@j59noc-slack-log.local 'chmod 600 ~/slack-log-bot/.env ~/slack-log-bot/*.json && sudo systemctl start slack-log-bot'

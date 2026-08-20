@@ -30,8 +30,8 @@ bot は `.env` が無いうちは起動しない（`ConditionPathExists`）の�
 送ってから起動します。
 
 ```bash
-scp .env client_secret.json drive_token.json nukui@slack-log-bot.local:~/slack-log-bot/
-ssh nukui@slack-log-bot.local 'chmod 600 ~/slack-log-bot/.env ~/slack-log-bot/*.json && sudo systemctl start slack-log-bot'
+scp .env client_secret.json drive_token.json nukui@j59noc-slack-log.local:~/slack-log-bot/
+ssh nukui@j59noc-slack-log.local 'chmod 600 ~/slack-log-bot/.env ~/slack-log-bot/*.json && sudo systemctl start slack-log-bot'
 ```
 
 Google 認証をまだ通していない場合は、手元のPCで `python setup.py` を済ませてから
@@ -40,7 +40,7 @@ Google 認証をまだ通していない場合は、手元のPCで `python setup
 ## 確認
 
 ```bash
-ssh nukui@slack-log-bot.local
+ssh nukui@j59noc-slack-log.local
 systemctl status slack-log-bot          # 常駐
 journalctl -u slack-log-bot -f          # ログ
 systemctl status slack-log-bot-install  # 初回のクローンとvenv構築
