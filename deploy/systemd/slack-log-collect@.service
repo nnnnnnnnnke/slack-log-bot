@@ -2,15 +2,18 @@
 #
 #   sudo systemctl enable --now slack-log-collect@public.timer
 
+# ユーザー名とパスは環境に合わせて書き換えること
+# （User= と /home/slackbot/slack-log-bot の2箇所）
+
 [Unit]
 Description=Slack Log Bot weekly collection (%i)
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/home/nukui/slack-log-bot/profiles/%i/.env
+ConditionPathExists=/home/slackbot/slack-log-bot/profiles/%i/.env
 
 [Service]
 Type=oneshot
-User=nukui
-WorkingDirectory=/home/nukui/slack-log-bot
+User=slackbot
+WorkingDirectory=/home/slackbot/slack-log-bot
 Environment=SLACK_LOG_PROFILE=%i
-ExecStart=/home/nukui/slack-log-bot/.venv/bin/python collect_weekly.py
+ExecStart=/home/slackbot/slack-log-bot/.venv/bin/python collect_weekly.py

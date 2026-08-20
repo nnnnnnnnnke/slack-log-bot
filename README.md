@@ -348,6 +348,15 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 依存パッケージのうちネイティブ拡張を持つのは `cryptography` / `cffi` / `protobuf` /
 `charset_normalizer` の4つだけで、arm64 ならすべてホイールが入ります。
 
+`deploy/raspi/` に cloud-init 一式があります。SDカードを焼いて `user-data` と
+`network-config` をブートパーティションに置けば、起動時に clone から
+仮想環境の構築、systemd への登録までが済みます。ホスト名・ユーザー名・
+IPアドレスは書き換えてください（`user-data` の先頭に一覧があります）。
+
+> **認証情報はブートパーティションに置かないでください。** FAT32 は
+> パーミッションを持てないので、カードを差した人なら誰でも読めます。
+> `.env` と `*.json` は起動後に scp で送ります。
+
 #### Google 認証をヘッドレスで通す
 
 `setup.py` の Google 認証はブラウザを開いて `localhost` で受け取るため、SSH 越しだとそのままでは完了できません。方法は2つあります。

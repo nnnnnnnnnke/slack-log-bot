@@ -1,5 +1,15 @@
 # cloud-init network-config (netplan v2)
-# j59noc-slack-log — 有線のみ。外向き接続しかしないが、SSH 先を固定したいので静的。
+#
+# 有線のみ。bot は外向き接続しかしないので待ち受けポートは不要だが、
+# ヘッドレス機に SSH で入るため、アドレスは固定しておく。
+#
+# ★ addresses / routes / nameservers を自分のネットワークに書き換えること。
+#   DHCP で構わないなら、下の ethernets を丸ごとこれに置き換える:
+#
+#     ethernets:
+#       eth0:
+#         dhcp4: true
+#         optional: true
 #
 # wifis は書かない。SSID を埋めないまま残すと、存在しないアクセスポイントへ
 # 延々と接続を試みる設定が有効なまま残る。無線を使うときだけ足す。
@@ -10,7 +20,7 @@ ethernets:
     dhcp6: false
     accept-ra: true
     addresses:
-      - 192.168.1.59/24
+      - 192.168.1.50/24
     routes:
       - to: default
         via: 192.168.1.1

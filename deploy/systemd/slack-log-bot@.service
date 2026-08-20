@@ -7,18 +7,21 @@
 # The name after @ is the profile: profiles/<name>/.env and its own
 # drive_token.json. One `git pull` updates every bot on the host.
 
+# ユーザー名とパスは環境に合わせて書き換えること
+# （User= と /home/slackbot/slack-log-bot の2箇所）
+
 [Unit]
 Description=Slack Log Bot (%i)
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/home/nukui/slack-log-bot/profiles/%i/.env
+ConditionPathExists=/home/slackbot/slack-log-bot/profiles/%i/.env
 
 [Service]
 Type=simple
-User=nukui
-WorkingDirectory=/home/nukui/slack-log-bot
+User=slackbot
+WorkingDirectory=/home/slackbot/slack-log-bot
 Environment=SLACK_LOG_PROFILE=%i
-ExecStart=/home/nukui/slack-log-bot/.venv/bin/python main.py
+ExecStart=/home/slackbot/slack-log-bot/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=30
 
@@ -26,7 +29,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/nukui/slack-log-bot
+ReadWritePaths=/home/slackbot/slack-log-bot
 
 [Install]
 WantedBy=multi-user.target
