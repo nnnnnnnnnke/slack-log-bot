@@ -790,26 +790,37 @@ class SheetsHandler:
                 if run_start is None:
                     run_start = start_row + offset
             elif run_start is not None:
-                requests.append(self._group_request(sheet_id, run_start, start_row + offset))
+                requests.extend(self._group_request(sheet_id, run_start, start_row + offset))
                 run_start = None
         if run_start is not None:
-            requests.append(
+            requests.extend(
                 self._group_request(sheet_id, run_start, start_row + len(rows_data))
             )
         return requests
 
     @staticmethod
-    def _group_request(sheet_id: int, first_row: int, after_row: int) -> dict:
-        return {
-            "addDimensionGroup": {
-                "range": {
-                    "sheetId": sheet_id,
-                    "dimension": "ROWS",
-                    "startIndex": first_row - 1,   # 1-indexed row -> 0-indexed
-                    "endIndex": after_row - 1,
-                }
-            }
+    def _group_request(sheet_id: int, first_row: int, after_row: int) -> list[dict]:
+        """Create the group, then fold it.
+
+        Two requests rather than one: addDimensionGroup has no collapsed field,
+        and a thread left open takes as much room as the channel around it —
+        which is what the folding was for.
+        """
+        span = {
+            "sheetId": sheet_id,
+            "dimension": "ROWS",
+            "startIndex": first_row - 1,   # 1-indexed row -> 0-indexed
+            "endIndex": after_row - 1,
         }
+        return [
+            {"addDimensionGroup": {"range": span}},
+            {
+                "updateDimensionGroup": {
+                    "dimensionGroup": {"range": span, "depth": 1, "collapsed": True},
+                    "fields": "collapsed",
+                }
+            },
+        ]
 
     def apply_thread_groups(
         self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
@@ -1313,7 +1324,7 @@ class SheetsHandler:
                     )
                     # Re-adding a group over the row extends the thread's
                     # existing group rather than creating a second one.
-                    requests.append(
+                    requests.extend(
                         self._group_request(worksheet.id, inserted_row, inserted_row + 1)
                     )
                 try:
