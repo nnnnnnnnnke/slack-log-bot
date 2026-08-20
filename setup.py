@@ -461,6 +461,10 @@ def provision_google_resources(
             drive, folder_name, "application/vnd.google-apps.folder"
         )
         env["GOOGLE_DRIVE_FOLDER_ID"] = folder_id
+        # Saved as soon as it is known. Anything created here exists in Drive
+        # whether or not the rest of this step succeeds, and an id left only in
+        # memory is one the next run has to find again by name.
+        write_env(env)
         ok(f"Drive フォルダを{'作成' if created else '検出'}: {folder_name}")
         print(f"      https://drive.google.com/drive/folders/{folder_id}")
 
@@ -475,6 +479,7 @@ def provision_google_resources(
             parent=folder_id,
         )
         env["GOOGLE_SPREADSHEET_ID"] = ss_id
+        write_env(env)
         ok(f"スプレッドシートを{'作成' if created else '検出'}: {ss_name}")
         print(f"      https://docs.google.com/spreadsheets/d/{ss_id}/edit")
 
