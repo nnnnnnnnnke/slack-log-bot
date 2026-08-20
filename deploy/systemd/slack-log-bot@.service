@@ -1,0 +1,32 @@
+# Template unit: one bot per profile, all from the same checkout.
+#
+#   sudo cp slack-log-bot@.service /etc/systemd/system/
+#   sudo systemctl enable --now slack-log-bot@public
+#   sudo systemctl enable --now slack-log-bot@leaders
+#
+# The name after @ is the profile: profiles/<name>/.env and its own
+# drive_token.json. One `git pull` updates every bot on the host.
+
+[Unit]
+Description=Slack Log Bot (%i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/nukui/slack-log-bot/profiles/%i/.env
+
+[Service]
+Type=simple
+User=nukui
+WorkingDirectory=/home/nukui/slack-log-bot
+Environment=SLACK_LOG_PROFILE=%i
+ExecStart=/home/nukui/slack-log-bot/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/nukui/slack-log-bot
+
+[Install]
+WantedBy=multi-user.target

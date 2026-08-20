@@ -1,0 +1,16 @@
+# Weekly catch-up for one profile. Paired with slack-log-collect@.timer.
+#
+#   sudo systemctl enable --now slack-log-collect@public.timer
+
+[Unit]
+Description=Slack Log Bot weekly collection (%i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/nukui/slack-log-bot/profiles/%i/.env
+
+[Service]
+Type=oneshot
+User=nukui
+WorkingDirectory=/home/nukui/slack-log-bot
+Environment=SLACK_LOG_PROFILE=%i
+ExecStart=/home/nukui/slack-log-bot/.venv/bin/python collect_weekly.py

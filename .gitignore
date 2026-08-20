@@ -7,3 +7,6 @@ __pycache__/
 .venv/
 venv/
 *.log
+
+# 複数プロファイルの設定（トークンが入る）
+profiles/

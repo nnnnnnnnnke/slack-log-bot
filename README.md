@@ -375,11 +375,65 @@ scp client_secret.json drive_token.json pi@raspberrypi.local:~/slack-log-bot/
 
 ---
 
-### 複数のワークスペースで使う場合
+### 複数の bot を動かす場合
 
-1つのワークスペースにつき **1ディレクトリ・1プロセス**です。
+1チャンネル群につき1体、という分け方ができます。たとえば公開チャンネル用と
+プライベートチャンネル用で、保存先の Google アカウントごと分ける場合です。
+
+**プロファイル**を使うと、1つのチェックアウトから複数の bot を動かせます。
+コードは共有され、Slack アプリ・Google アカウント・保存先だけが分かれます。
+`git pull` 1回で全部の bot が更新されます。
+
+```
+slack-log-bot/
+├── client_secret.json          ← 共通で使う場合はここ（プロファイル側にもあればそちら優先）
+└── profiles/
+    ├── public/
+    │   ├── .env                ← Slack トークン・保存先ID
+    │   └── drive_token.json    ← Google アカウントA
+    └── leaders/
+        ├── .env
+        └── drive_token.json    ← Google アカウントB
+```
+
+セットアップは `--profile` を付けて、bot の数だけ繰り返します。
+
+```bash
+.venv/bin/python setup.py --profile public
+.venv/bin/python setup.py --profile leaders
+```
+
+実行時は `SLACK_LOG_PROFILE` で切り替えます。
+
+```bash
+SLACK_LOG_PROFILE=leaders .venv/bin/python main.py
+SLACK_LOG_PROFILE=leaders .venv/bin/python backfill.py --days 90
+```
+
+常駐化には `deploy/systemd/` のテンプレートユニットを使います。`@` の後ろが
+プロファイル名です。
+
+```bash
+sudo cp deploy/systemd/slack-log-*@.* /etc/systemd/system/
+sudo systemctl enable --now slack-log-bot@public
+sudo systemctl enable --now slack-log-bot@leaders
+sudo systemctl enable --now slack-log-collect@public.timer
+```
+
+> `--profile` を付けずに実行すると、これまで通りチェックアウト直下の `.env` を
+> 読みます。1体だけ動かしている既存の環境はそのまま動きます。
+
+**Slack App は bot ごとに作成が必要です**（Step 1 を bot の数だけ実施）。
+`features.bot_user.display_name` を `slack-log-bot-private` のように変えてください。
+ASCII のみです。
+
+**1つのチャンネルに2体 invite しないでください。** 同じ発言が両方のシートに
+記録されます。
+
+#### 別々のワークスペースで使う場合
+
 `setup.py` が作る Drive フォルダと索引スプレッドシートには**ワークスペース名が入る**ため、
-同じGoogleアカウントでも混ざりません。
+同じ Google アカウントでも混ざりません。
 
 ```
 📁 Slack ログ - 研究室        ← ワークスペースA
@@ -389,22 +443,10 @@ scp client_secret.json drive_token.json pi@raspberrypi.local:~/slack-log-bot/
 > 名前を分けていないと、2つ目のワークスペースが1つ目のフォルダを名前で見つけて再利用し、
 > 同名チャンネル（`#general` など）のログが同じスプレッドシートに混ざります。
 
-2つ目以降は、別ディレクトリにクローンして `setup.py` を実行します。
-Google の認証情報は使い回せるので、コピーすれば Step 2 とブラウザ認証を省けます。
-
-```bash
-git clone https://github.com/nnnnnnnnnke/slack-log-bot.git ~/Documents/slack-log-bot-B
-cd ~/Documents/slack-log-bot-B
-cp ~/Documents/slack-log-bot/client_secret.json ~/Documents/slack-log-bot/drive_token.json .
-uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python -r requirements.txt
-.venv/bin/python setup.py
-```
-
-Slack App は**ワークスペースごとに作成が必要**です（Step 1 をそのワークスペースで実施）。
+Google の認証情報は使い回せます。同じ Google アカウントに保存するなら、
+`client_secret.json` をチェックアウト直下に置けば全プロファイルが共有します。
 
 ---
-
 ### Step 3: botのインストール
 
 ```bash

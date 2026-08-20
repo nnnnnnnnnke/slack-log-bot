@@ -13,12 +13,34 @@ if sys.version_info < (3, 10):
     )
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
 
-SETUP_HINT = "`python setup.py` を実行するとセットアップできます。"
+# Which set of credentials this process runs on. One checkout can drive
+# several bots — a public one and a private one, say — each with its own
+# Slack app, Google account and Drive folder, kept apart under profiles/.
+# Unset means the checkout's own root, which is what a single-bot install
+# has always been and stays.
+PROFILE = os.environ.get("SLACK_LOG_PROFILE", "").strip()
+PROFILE_DIR = BASE_DIR / "profiles" / PROFILE if PROFILE else BASE_DIR
+
+if PROFILE and not PROFILE_DIR.is_dir():
+    raise SystemExit(
+        f"[設定エラー] プロファイル '{PROFILE}' が見つかりません（{PROFILE_DIR}）。\n"
+        f"  `python setup.py --profile {PROFILE}` を実行すると作成できます。"
+    )
+
+# An explicit path so the bot does not depend on which directory it was
+# started from; with a profile there is more than one .env to choose between.
+load_dotenv(PROFILE_DIR / ".env")
+
+SETUP_HINT = (
+    f"`python setup.py --profile {PROFILE}` を実行するとセットアップできます。"
+    if PROFILE else "`python setup.py` を実行するとセットアップできます。"
+)
 
 
 def _required(name: str, hint: str = "") -> str:
@@ -38,8 +60,24 @@ SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
 # Sheets and Drive share one OAuth2 user credential; see google_auth.py
 GOOGLE_SPREADSHEET_ID = _required("GOOGLE_SPREADSHEET_ID")
 GOOGLE_DRIVE_FOLDER_ID = _required("GOOGLE_DRIVE_FOLDER_ID")
-GOOGLE_DRIVE_TOKEN_FILE = os.environ.get("GOOGLE_DRIVE_TOKEN_FILE", "drive_token.json")
-GOOGLE_OAUTH_CLIENT_FILE = os.environ.get("GOOGLE_OAUTH_CLIENT_FILE", "client_secret.json")
+def _client_file() -> str:
+    """The OAuth client for this profile, falling back to the shared one.
+
+    A client is not tied to a Google account — one can authorise all three —
+    so a client_secret.json at the checkout root serves every profile, and a
+    profile needing its own just puts one beside its .env.
+    """
+    own = PROFILE_DIR / "client_secret.json"
+    if own.exists() or not PROFILE:
+        return str(own)
+    return str(BASE_DIR / "client_secret.json")
+
+
+# The token is the account, so it never falls back to another profile's.
+GOOGLE_DRIVE_TOKEN_FILE = os.environ.get("GOOGLE_DRIVE_TOKEN_FILE") or str(
+    PROFILE_DIR / "drive_token.json"
+)
+GOOGLE_OAUTH_CLIENT_FILE = os.environ.get("GOOGLE_OAUTH_CLIENT_FILE") or _client_file()
 
 TIMEZONE = os.environ.get("TIMEZONE", "Asia/Tokyo")
 

@@ -35,7 +35,39 @@ from dotenv import dotenv_values, load_dotenv
 # missing, which is exactly the situation this script exists to fix.
 import google_auth
 
-ENV_FILE = ".env"
+ENV_FILE = ".env"   # rewritten by apply_profile() before anything reads it
+PROFILE_ROOT = "profiles"
+
+
+def apply_profile(name: str):
+    """Point this run's files at profiles/<name>/ instead of the root.
+
+    One checkout, several bots: a public one and a private one want different
+    Slack apps, different Google accounts and different Drive folders, and
+    nothing but the code is shared between them. Keeping each set in its own
+    directory means one `git pull` updates them all.
+
+    The paths go into the environment because config.py and google_auth.py
+    read them from there, and because the bot itself is pointed at a profile
+    the same way — SLACK_LOG_PROFILE in its systemd unit.
+    """
+    global ENV_FILE
+    base = os.path.dirname(os.path.abspath(__file__))
+    directory = os.path.join(base, PROFILE_ROOT, name)
+    os.makedirs(directory, exist_ok=True)
+    os.chmod(directory, 0o700)   # a token and a bot token live here
+
+    ENV_FILE = os.path.join(directory, ".env")
+    os.environ["SLACK_LOG_PROFILE"] = name
+    os.environ["GOOGLE_DRIVE_TOKEN_FILE"] = os.path.join(directory, "drive_token.json")
+
+    # An OAuth client is not account-specific, so a shared one at the root
+    # serves every profile unless this one brought its own.
+    own_client = os.path.join(directory, "client_secret.json")
+    os.environ["GOOGLE_OAUTH_CLIENT_FILE"] = (
+        own_client if os.path.exists(own_client)
+        else os.path.join(base, "client_secret.json")
+    )
 ENV_EXAMPLE = ".env.example"
 
 # One folder holds everything the bot owns for a workspace: the index
@@ -592,6 +624,11 @@ def verify(env: dict[str, str]):
 def main():
     parser = argparse.ArgumentParser(description="Slack Log Bot セットアップ")
     parser.add_argument(
+        "--profile", metavar="NAME", default="",
+        help="複数の bot を1つのチェックアウトで動かす場合の名前"
+             "（例: --profile leaders → profiles/leaders/ 配下に設定を作る）",
+    )
+    parser.add_argument(
         "--reauth", action="store_true", help="Google の認証をやり直す"
     )
     parser.add_argument(
@@ -601,7 +638,12 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.profile:
+        apply_profile(args.profile)
+
     print("\033[1mSlack Log Bot セットアップ\033[0m")
+    if args.profile:
+        print(f"  プロファイル: \033[1m{args.profile}\033[0m  ({PROFILE_ROOT}/{args.profile}/)")
 
     env = read_env()
     env, workspace, channels = check_slack(env)
