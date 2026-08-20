@@ -39,6 +39,31 @@ drive = DriveHandler()
 
 
 _bot_user_ids: tuple[str, ...] | None = None
+_bot_handle: str | None = None
+
+
+def bot_handle(client) -> str:
+    """How to address the bot, as Slack currently spells it.
+
+    Read from Slack rather than hard-coded: the app can be renamed at any
+    time, and help text naming a handle that no longer works is worse than
+    no help text.
+    """
+    global _bot_handle
+    if _bot_handle is None:
+        try:
+            user_id = client.auth_test().get("user_id", "")
+            profile = client.users_info(user=user_id)["user"]
+            _bot_handle = (
+                profile.get("profile", {}).get("display_name")
+                or profile.get("real_name")
+                or profile.get("name")
+                or "bot"
+            )
+        except Exception as e:
+            logger.warning(f"Could not resolve the bot's own name: {e}")
+            _bot_handle = "bot"
+    return _bot_handle
 
 
 def bot_user_ids(client) -> tuple[str, ...]:
@@ -311,18 +336,22 @@ def handle_mention(event, client, say, logger):
             say(f":memo: `#{channel_name}` のログはまだ作成されていません。メッセージが投稿されると自動的に作成されます。")
 
     elif cleaned == "help" or cleaned == "":
+        me = bot_handle(client)
         url = sheets.get_spreadsheet_url(channel_name)
         url_line = f"\n:link: {url}" if url else ""
         say(
             f":memo: *`#{channel_name}` のログBot*{url_line}\n\n"
             f"*コマンド一覧:*\n"
-            f"• `@Log Bot url` — スプレッドシートURL表示\n"
-            f"• `@Log Bot backfill` — 過去90日分のログを収集\n"
-            f"• `@Log Bot backfill 30` — 過去N日分を収集"
+            f"• `@{me} url` — スプレッドシートURL表示\n"
+            f"• `@{me} backfill` — 過去90日分のログを収集\n"
+            f"• `@{me} backfill 30` — 過去N日分を収集"
         )
 
     else:
-        say(":thinking_face: 不明なコマンドです。`@Log Bot help` でコマンド一覧を確認できます。")
+        say(
+            f":thinking_face: 不明なコマンドです。"
+            f"`@{bot_handle(client)} help` でコマンド一覧を確認できます。"
+        )
 
 
 def _backfill_channel(client, channel_id: str, channel_name: str, days: int):
