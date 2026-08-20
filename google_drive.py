@@ -23,13 +23,23 @@ ATTACHMENTS_FOLDER_NAME = "添付ファイル"
 CHANNEL_ID_PROPERTY = "slackChannelId"
 
 
-def sync_permissions(
-    service, file_id: str, member_emails: list[str], revoke: list[str] | None = None
-) -> tuple[int, int]:
-    """Bring a file's readers in line with a channel's membership.
+# Drive roles, weakest first, so a share is only ever raised.
+ROLE_RANK = {
+    "reader": 1, "commenter": 2, "writer": 3,
+    "fileOrganizer": 4, "organizer": 5, "owner": 6,
+}
 
-    Returns (granted, revoked). Only readers are touched: the owner and any
-    writer stay, so a share someone set up by hand is not undone.
+
+def sync_permissions(
+    service, file_id: str, member_emails: list[str],
+    revoke: list[str] | None = None, role: str = "reader",
+) -> tuple[int, int]:
+    """Bring a file's sharing in line with a channel's membership.
+
+    Returns (granted, revoked). Someone already holding a stronger role than
+    `role` keeps it, so a share set up by hand is not quietly downgraded. A
+    weaker one is raised, which is how a file shared before the wanted role
+    changed catches up without a migration.
 
     `revoke` is an explicit list rather than "anyone not in member_emails" —
     a member whose email cannot be resolved would otherwise look like someone
@@ -43,31 +53,36 @@ def sync_permissions(
         logger.warning(f"Could not read permissions for {file_id}: {e}")
         return (0, 0)
 
-    readers = {
+    by_email = {
         p.get("emailAddress", "").lower(): p
         for p in existing
-        if p.get("type") == "user" and p.get("role") == "reader"
+        if p.get("type") == "user" and p.get("emailAddress")
     }
-    present = {p.get("emailAddress", "").lower() for p in existing if p.get("emailAddress")}
 
     granted = 0
     for email in member_emails:
-        if email.lower() in present:
-            continue
+        current = by_email.get(email.lower())
         try:
-            service.permissions().create(
-                fileId=file_id,
-                body={"type": "user", "role": "reader", "emailAddress": email},
-                sendNotificationEmail=False,
-            ).execute()
-            granted += 1
+            if current is None:
+                service.permissions().create(
+                    fileId=file_id,
+                    body={"type": "user", "role": role, "emailAddress": email},
+                    sendNotificationEmail=False,
+                ).execute()
+                granted += 1
+            elif ROLE_RANK.get(current.get("role"), 0) < ROLE_RANK.get(role, 0):
+                service.permissions().update(
+                    fileId=file_id, permissionId=current["id"], body={"role": role},
+                ).execute()
         except Exception as e:
             logger.warning(f"Failed to share {file_id} with {email}: {e}")
 
     revoked = 0
     for email in revoke or []:
-        permission = readers.get(email.lower())
-        if not permission:
+        permission = by_email.get(email.lower())
+        # Whoever left is dropped whatever role they hold, but the owner is in
+        # this list too and cannot be removed from their own file.
+        if not permission or permission.get("role") == "owner":
             continue
         try:
             service.permissions().delete(

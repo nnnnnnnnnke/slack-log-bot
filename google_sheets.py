@@ -983,11 +983,17 @@ class SheetsHandler:
         return f"Slack Log - #{channel_name}"
 
     def share_with_members(self, spreadsheet, member_emails: list[str]) -> int:
-        """Grant read access to a channel's members. Returns how many were added."""
+        """Grant a channel's members edit access. Returns how many were added.
+
+        Edit rather than view: Sheets offers the outline +/- toggles only to
+        someone who can edit, and a log whose threads cannot be folded is the
+        wall of text the folding was there to fix.
+        """
+        self._restrict_resharing(spreadsheet.id)
         added = 0
         for email in member_emails:
             try:
-                spreadsheet.share(email, perm_type="user", role="reader", notify=False)
+                spreadsheet.share(email, perm_type="user", role="writer", notify=False)
                 added += 1
             except Exception as e:
                 logger.warning(f"Failed to share {spreadsheet.title} with {email}: {e}")
@@ -997,11 +1003,27 @@ class SheetsHandler:
         self, channel_name: str, member_emails: list[str],
         revoke: list[str] | None = None, channel_id: str = "",
     ) -> tuple[int, int]:
-        """Match the channel spreadsheet's readers to the channel's membership."""
+        """Match the channel spreadsheet's sharing to the channel's membership."""
         ss = self._get_or_create_channel_spreadsheet(
             channel_name, member_emails, channel_id
         )
-        return sync_permissions(self._drive, ss.id, member_emails, revoke)
+        return sync_permissions(
+            self._drive, ss.id, member_emails, revoke, role="writer"
+        )
+
+    def _restrict_resharing(self, file_id: str):
+        """Stop editors passing the file on.
+
+        Edit access carries the right to share unless this is turned off, and
+        one member of a private channel could otherwise hand its log to the
+        whole workspace — which is the thing the per-channel split prevents.
+        """
+        try:
+            self._drive.files().update(
+                fileId=file_id, body={"writersCanShare": False}
+            ).execute()
+        except Exception as e:
+            logger.warning(f"Could not restrict re-sharing on {file_id}: {e}")
 
     def _find_by_channel_id(self, channel_id: str) -> dict | None:
         """The spreadsheet stamped with this channel id, if there is one."""
