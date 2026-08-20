@@ -265,7 +265,7 @@ def check_slack(env: dict[str, str]) -> dict[str, str]:
 
 # ── Step 2: Google OAuth2 ──
 
-def run_google_auth(reauth: bool = False):
+def run_google_auth(reauth: bool = False, port: int = 0):
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     step(2, "Google の認証")
@@ -293,9 +293,13 @@ def run_google_auth(reauth: bool = False):
 
     print("  ブラウザが開きます。Google アカウントでアクセスを許可してください。")
     print("  「このアプリは確認されていません」の警告は 詳細 → 移動 で進めます。")
+    if port:
+        print(f"  ポート {port} で待ち受けます。SSH 越しの場合は手元の端末で:")
+        print(f"    ssh -L {port}:localhost:{port} <このホスト>")
+        print("  を張ってから、表示される URL をブラウザで開いてください。")
     flow = InstalledAppFlow.from_client_secrets_file(client_file, google_auth.SCOPES)
     try:
-        creds = flow.run_local_server(port=0)
+        creds = flow.run_local_server(port=port, open_browser=not port)
     except Exception as e:
         message = str(e)
         if "access_denied" in message:
@@ -540,6 +544,11 @@ def main():
     parser.add_argument(
         "--reauth", action="store_true", help="Google の認証をやり直す"
     )
+    parser.add_argument(
+        "--auth-port", type=int, default=0, metavar="PORT",
+        help="Google 認証の待ち受けポートを固定する"
+             "（ヘッドレス機で SSH ポートフォワードを使う場合）",
+    )
     args = parser.parse_args()
 
     print("\033[1mSlack Log Bot セットアップ\033[0m")
@@ -548,7 +557,7 @@ def main():
     env, workspace, channels = check_slack(env)
     write_env(env)
 
-    run_google_auth(reauth=args.reauth)
+    run_google_auth(reauth=args.reauth, port=args.auth_port)
 
     env = provision_google_resources(env, workspace, channels)
     write_env(env)

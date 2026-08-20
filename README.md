@@ -302,6 +302,52 @@ App-Level Token だけはマニフェストで作れないため、手動で生�
 
 ---
 
+### Raspberry Pi / ヘッドレス機で動かす場合
+
+常時稼働させるなら Raspberry Pi 4 で十分動きます。Socket Mode なので**受信ポートを開ける必要はありません**。
+
+**64bit版の Raspberry Pi OS（Bookworm 以降）を使ってください。**
+
+- Bookworm は Python 3.11 なのでそのまま使えます（**Bullseye は 3.9 なので動きません**）
+- 32bit版（armhf）は `cryptography` のビルド済みホイールが無く、Rust でのソースビルドになります
+
+依存パッケージのうちネイティブ拡張を持つのは `cryptography` / `cffi` / `protobuf` /
+`charset_normalizer` の4つだけで、arm64 ならすべてホイールが入ります。
+
+#### Google 認証をヘッドレスで通す
+
+`setup.py` の Google 認証はブラウザを開いて `localhost` で受け取るため、SSH 越しだとそのままでは完了できません。方法は2つあります。
+
+**A. SSHポートフォワード**（Pi 上で完結させたい場合）
+
+手元の端末から:
+
+```bash
+ssh -L 8080:localhost:8080 pi@raspberrypi.local
+```
+
+Pi 側で:
+
+```bash
+python setup.py --auth-port 8080
+```
+
+表示されたURLを**手元のブラウザ**で開けば、リダイレクトがフォワード経由でPiに届きます。
+
+**B. 認証だけ手元のPCで済ませる**（簡単）
+
+手元のPCで `python setup.py` を通したあと、生成された `client_secret.json` と
+`drive_token.json` を Pi にコピーします。`setup.py` は既存の認証を再利用するので、
+Pi 側ではブラウザが不要になります。
+
+```bash
+scp client_secret.json drive_token.json pi@raspberrypi.local:~/slack-log-bot/
+```
+
+常駐は後述の [systemd の手順](#systemd-で常駐化-linux)がそのまま使えます。
+
+---
+
 ### 複数のワークスペースで使う場合
 
 1つのワークスペースにつき **1ディレクトリ・1プロセス**です。
