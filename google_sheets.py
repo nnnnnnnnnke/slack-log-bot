@@ -213,6 +213,9 @@ COLOR_SHEET_HEADER = ["表示名", "色番号"]
 # does not orphan the history under the old name.
 CHANNEL_ID_PROPERTY = "slackChannelId"
 
+# Drive ids as they appear in an attachment link
+DRIVE_ID_PATTERN = re.compile(r"/d/([A-Za-z0-9_-]{20,})|[?&]id=([A-Za-z0-9_-]{20,})")
+
 JST = timezone(timedelta(hours=9))
 
 # Collapsing an outline group only hides the rows; Sheets shows nothing in
@@ -661,6 +664,147 @@ class SheetsHandler:
                 yield spreadsheet, spreadsheet.sheet1
             except Exception as e:
                 logger.warning(f"Could not open {meta['name']}: {e}")
+
+    def _linked_file_ids(self, spreadsheet, worksheet, row_number: int) -> list[str]:
+        """Drive ids that one row's attachment cell points at.
+
+        Both spellings are read. Rows written before file names became links
+        hold the URL as text; newer ones hold it only in the cell's rich text,
+        where col_values cannot see it at all.
+
+        Returns [] on any failure, which leaves the files alone. An attachment
+        left behind is untidy; one thrown away because a read came back short
+        is not recoverable from the sheet.
+        """
+        cell = f"{_column_letter(ATTACHMENT_COLUMN)}{row_number}"
+        try:
+            response = _retry(
+                self.gc.http_client.request, "get",
+                f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet.id}",
+                params={
+                    "ranges": f"'{worksheet.title}'!{cell}",
+                    "fields": (
+                        "sheets/data/rowData/values("
+                        "formattedValue,"
+                        "textFormatRuns/format/link/uri,"
+                        "userEnteredFormat/textFormat/link/uri)"
+                    ),
+                },
+            ).json()
+            values = (
+                response["sheets"][0]["data"][0].get("rowData", [{}])[0].get("values", [])
+            )
+        except Exception as e:
+            logger.warning(f"Could not read the attachments on row {row_number}: {e}")
+            return []
+        if not values:
+            return []
+
+        value = values[0]
+        uris = [
+            run.get("format", {}).get("link", {}).get("uri", "")
+            for run in value.get("textFormatRuns", [])
+        ]
+        # Sheets folds a run spanning the whole string into the cell's own
+        # format and then reports no runs, so a single attachment lands here.
+        uris.append(
+            value.get("userEnteredFormat", {})
+            .get("textFormat", {}).get("link", {}).get("uri", "")
+        )
+        uris.append(value.get("formattedValue", ""))
+
+        ids = []
+        for uri in uris:
+            for match in DRIVE_ID_PATTERN.finditer(uri or ""):
+                file_id = match.group(1) or match.group(2)
+                if file_id not in ids:
+                    ids.append(file_id)
+        return ids
+
+    def delete_message(
+        self, channel_name: str, ts: str,
+        member_emails: list[str] | None = None, channel_id: str = "",
+    ) -> bool:
+        """Take a message out of the log after it was deleted in Slack.
+
+        The row goes rather than being struck through. A message is usually
+        deleted because it should not have been posted, and a copy of it that
+        everyone in the channel can still read in a spreadsheet is the thing
+        the person was trying to undo. Anything it attached goes to the Drive
+        trash for the same reason — the trash, so a deletion made in error is
+        still recoverable for a while.
+        """
+        with self._lock:
+            worksheet = self._get_worksheet(channel_name, member_emails, channel_id)
+            spreadsheet = self._get_spreadsheet(channel_name)
+            try:
+                stamps = _retry(worksheet.col_values, TS_COLUMN)
+            except Exception as e:
+                logger.warning(f"Could not read timestamps in #{channel_name}: {e}")
+                return False
+
+            row_number = next(
+                (i + 1 for i, value in enumerate(stamps) if i and value == ts), None
+            )
+            if row_number is None:
+                return False
+
+            file_ids = self._linked_file_ids(spreadsheet, worksheet, row_number)
+
+            try:
+                _retry(worksheet.delete_rows, row_number, idempotent=False)
+            except Exception as e:
+                logger.warning(f"Could not remove the deleted message's row: {e}")
+                return False
+
+            self._existing_ts.get(channel_name, set()).discard(ts)
+            logger.info(f"Removed a deleted message from #{channel_name} (ts={ts})")
+
+            for file_id in file_ids:
+                try:
+                    self._drive.files().update(
+                        fileId=file_id, body={"trashed": True}
+                    ).execute()
+                    logger.info(f"Sent {file_id} to the Drive trash with it")
+                except Exception as e:
+                    logger.warning(f"Could not trash the attachment {file_id}: {e}")
+
+            self._repair_after_removal(worksheet, spreadsheet, row_number)
+            return True
+
+    def _repair_after_removal(
+        self, worksheet: gspread.Worksheet, spreadsheet: gspread.Spreadsheet,
+        row_number: int,
+    ):
+        """Put right what the removed row was carrying.
+
+        Two things outlive it. A parent's reply count is one more than the
+        thread now has, and the rule that marks a change of speaker was drawn
+        against a neighbour that is no longer there.
+        """
+        # Cosmetic, and it runs after the row is already gone, so nothing here
+        # is allowed to raise into the caller and report a failed deletion.
+        try:
+            rows = _retry(worksheet.get_all_values)[1:]
+            requests = self.reply_count_requests(worksheet.id, rows)
+
+            def author_at(index: int) -> str:
+                row = rows[index]
+                return row[USERNAME_COLUMN - 1] if len(row) >= USERNAME_COLUMN else ""
+
+            # The row below moved up, so whether it opens a new speaker changed.
+            moved_up = row_number - 2      # 0-indexed into rows, header dropped
+            if 0 <= moved_up < len(rows):
+                author = author_at(moved_up)
+                previous = author_at(moved_up - 1) if moved_up else None
+                requests.extend(self.author_style_requests(
+                    worksheet.id, row_number, [author], previous
+                ))
+
+            if requests:
+                _retry(spreadsheet.batch_update, {"requests": requests})
+        except Exception as e:
+            logger.warning(f"Could not tidy up after the removed row: {e}")
 
     def update_message(
         self, channel_name: str, ts: str, text: str,

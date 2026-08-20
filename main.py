@@ -104,7 +104,10 @@ def handle_message(event, client, logger):
     if subtype == "message_changed":
         handle_message_edited(event, client, logger)
         return
-    if subtype in ("bot_message", "message_deleted", "channel_join", "channel_leave"):
+    if subtype == "message_deleted":
+        handle_message_deleted(event, client, logger)
+        return
+    if subtype in ("bot_message", "channel_join", "channel_leave"):
         return
 
     channel_id = event.get("channel", "")
@@ -171,6 +174,27 @@ def handle_message_edited(event, client, logger):
         )
     except Exception as e:
         logger.error(f"Failed to apply an edit in #{channel_name}: {e}")
+
+
+def handle_message_deleted(event, client, logger):
+    """Drop a message from the log once it is deleted in Slack.
+
+    Slack reports the deletion but not who wrote it, so the row is found by
+    its timestamp. A timestamp that matches nothing is the bot's own post or
+    a message from before it joined, and there is nothing to remove.
+    """
+    ts = event.get("deleted_ts") or (event.get("previous_message") or {}).get("ts", "")
+    if not ts:
+        return
+
+    channel_id = event.get("channel", "")
+    channel_name = get_channel_info(client, channel_id)["name"]
+    try:
+        sheets.delete_message(
+            channel_name, ts, get_member_emails(client, channel_id), channel_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to remove a deleted message in #{channel_name}: {e}")
 
 
 @app.event("user_change")
