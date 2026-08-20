@@ -14,11 +14,10 @@ import unicodedata
 from datetime import datetime, timezone, timedelta
 
 import gspread
-from googleapiclient.discovery import build
 
 import config
 from google_auth import load_credentials
-from google_drive import sync_permissions
+from google_drive import drive_service, shared_drive_id, sync_permissions
 from sheet_guide import ensure_guide_sheet, write_channel_index
 
 logger = logging.getLogger(__name__)
@@ -242,9 +241,12 @@ class SheetsHandler:
         # Holds the guide and the channel index; message rows live in the
         # per-channel spreadsheets beside it.
         self.index_spreadsheet = self.gc.open_by_key(config.GOOGLE_SPREADSHEET_ID)
-        self._drive = build("drive", "v3", credentials=creds)
+        self._drive = drive_service(creds)
 
         self.drive_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
+        # A shared drive answers "who can read this" on its own, so the
+        # per-channel sharing below stands down when the logs live in one.
+        self.shared_drive_id = shared_drive_id(self._drive, self.drive_folder_id)
         self._sheet_cache: dict[str, gspread.Worksheet] = {}
         self._existing_ts: dict[str, set[str]] = {}
         self._channel_spreadsheets: dict[str, gspread.Spreadsheet] = {}
@@ -262,7 +264,7 @@ class SheetsHandler:
         # Covers spreadsheets created before the guide existed. It is skipped
         # once present, and must never stop the bot from starting.
         try:
-            if ensure_guide_sheet(self.index_spreadsheet):
+            if ensure_guide_sheet(self.index_spreadsheet, bool(self.shared_drive_id)):
                 logger.info("Created guide sheet in the shared spreadsheet")
         except Exception as e:
             logger.warning(f"Could not create guide sheet: {e}")
@@ -988,7 +990,13 @@ class SheetsHandler:
         Edit rather than view: Sheets offers the outline +/- toggles only to
         someone who can edit, and a log whose threads cannot be folded is the
         wall of text the folding was there to fix.
+
+        In a shared drive nobody is added here. Membership is the drive's, a
+        share added on top of it could not be taken back, and the drive's own
+        members can already edit.
         """
+        if self.shared_drive_id:
+            return 0
         self._restrict_resharing(spreadsheet.id)
         added = 0
         for email in member_emails:
@@ -1007,6 +1015,8 @@ class SheetsHandler:
         ss = self._get_or_create_channel_spreadsheet(
             channel_name, member_emails, channel_id
         )
+        if self.shared_drive_id:
+            return (0, 0)
         return sync_permissions(
             self._drive, ss.id, member_emails, revoke, role="writer"
         )
@@ -1017,7 +1027,12 @@ class SheetsHandler:
         Edit access carries the right to share unless this is turned off, and
         one member of a private channel could otherwise hand its log to the
         whole workspace — which is the thing the per-channel split prevents.
+
+        Not a shared drive's business: sharing there is the drive's setting,
+        and the field is rejected on a file it owns.
         """
+        if self.shared_drive_id:
+            return
         try:
             self._drive.files().update(
                 fileId=file_id, body={"writersCanShare": False}

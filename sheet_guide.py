@@ -21,6 +21,17 @@ DEFAULT_SHEET_TITLES = {"シート1", "シート 1", "Sheet1", "Sheet 1"}
 
 SECTION_PREFIX = "▍"
 
+# Who can read the logs depends on where they are kept, and the sheet should
+# not claim the wrong one. Inserted after the line about the index tab.
+SHARING_ROWS_OWN_DRIVE = [
+    ("", "各スプレッドシートは、そのチャンネルのメンバーにだけ共有されています。"),
+    ("", "メンバーが参加・退出すると、共有先も自動で追従します。"),
+]
+SHARING_ROWS_SHARED_DRIVE = [
+    ("", "各スプレッドシートは共有ドライブの中にあります。"),
+    ("", "閲覧できる範囲は共有ドライブのメンバーで決まり、ファイル単位では絞れません。"),
+]
+
 GUIDE_ROWS: list[tuple[str, str]] = [
     ("Slack ログ", ""),
     ("", ""),
@@ -31,8 +42,6 @@ GUIDE_ROWS: list[tuple[str, str]] = [
     (f"{SECTION_PREFIX} ファイルの構成", ""),
     ("", "ログ本体はこのファイルではなく、チャンネルごとの別スプレッドシートにあります。"),
     ("", f"「{INDEX_SHEET_TITLE}」タブに一覧とリンクがあります。"),
-    ("", "各スプレッドシートは、そのチャンネルのメンバーにだけ共有されています。"),
-    ("", "メンバーが参加・退出すると、共有先も自動で追従します。"),
     ("", "（Google スプレッドシートはタブ単位で権限を分けられないため、ファイルを分けています）"),
     ("", ""),
     (f"{SECTION_PREFIX} 列の意味", ""),
@@ -71,7 +80,7 @@ COLOR_ACCENT = {"red": 0.118, "green": 0.557, "blue": 0.243}  # #1e8e3e
 COLOR_MUTED = {"red": 0.55, "green": 0.55, "blue": 0.55}
 
 
-def _format_requests(sheet_id: int) -> list[dict]:
+def _format_requests(sheet_id: int, rows: list[tuple[str, str]]) -> list[dict]:
     requests = [
         # Reads as a document rather than a grid
         {
@@ -111,7 +120,7 @@ def _format_requests(sheet_id: int) -> list[dict]:
                 "range": {
                     "sheetId": sheet_id,
                     "startRowIndex": 1,
-                    "endRowIndex": len(GUIDE_ROWS),
+                    "endRowIndex": len(rows),
                     "startColumnIndex": 1,
                     "endColumnIndex": 2,
                 },
@@ -121,7 +130,7 @@ def _format_requests(sheet_id: int) -> list[dict]:
         },
     ]
 
-    for i, (label, _) in enumerate(GUIDE_ROWS):
+    for i, (label, _) in enumerate(rows):
         if not label.startswith(SECTION_PREFIX):
             continue
         requests.append({
@@ -139,7 +148,7 @@ def _format_requests(sheet_id: int) -> list[dict]:
     # Footer note
     requests.append({
         "repeatCell": {
-            "range": {"sheetId": sheet_id, "startRowIndex": len(GUIDE_ROWS) - 1, "endRowIndex": len(GUIDE_ROWS)},
+            "range": {"sheetId": sheet_id, "startRowIndex": len(rows) - 1, "endRowIndex": len(rows)},
             "cell": {"userEnteredFormat": {"textFormat": {"fontSize": 9, "foregroundColor": COLOR_MUTED}}},
             "fields": "userEnteredFormat.textFormat",
         }
@@ -229,7 +238,15 @@ def _is_blank(worksheet) -> bool:
     return not any(cell.strip() for row in worksheet.get_all_values() for cell in row)
 
 
-def ensure_guide_sheet(spreadsheet) -> bool:
+def guide_rows(shared_drive: bool = False) -> list[tuple[str, str]]:
+    """The guide's rows, with the sharing lines that match where logs live."""
+    sharing = SHARING_ROWS_SHARED_DRIVE if shared_drive else SHARING_ROWS_OWN_DRIVE
+    anchor = ("", f"「{INDEX_SHEET_TITLE}」タブに一覧とリンクがあります。")
+    at = GUIDE_ROWS.index(anchor) + 1
+    return GUIDE_ROWS[:at] + sharing + GUIDE_ROWS[at:]
+
+
+def ensure_guide_sheet(spreadsheet, shared_drive: bool = False) -> bool:
     """Write the guide into the spreadsheet's default sheet.
 
     Returns True if it was written, False if it was already there. Never
@@ -252,7 +269,7 @@ def ensure_guide_sheet(spreadsheet) -> bool:
                 logger.warning(f"Could not remove empty sheet {ws.title}: {e}")
         return False
 
-    rows = [list(row) for row in GUIDE_ROWS]
+    rows = [list(row) for row in guide_rows(shared_drive)]
 
     # Prefer reusing the leftover default sheet, but only while it is untouched.
     target = None
@@ -267,7 +284,7 @@ def ensure_guide_sheet(spreadsheet) -> bool:
 
     target.update(rows, "A1", value_input_option="RAW")
     try:
-        spreadsheet.batch_update({"requests": _format_requests(target.id)})
+        spreadsheet.batch_update({"requests": _format_requests(target.id, rows)})
     except Exception as e:
         logger.warning(f"Failed to format guide sheet: {e}")
 

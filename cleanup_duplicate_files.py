@@ -20,11 +20,10 @@ import sys
 from collections import defaultdict
 
 import gspread
-from googleapiclient.discovery import build
 
 import config
 from google_auth import load_credentials
-from google_drive import ATTACHMENTS_FOLDER_NAME, FOLDER_MIME
+from google_drive import drive_service, ATTACHMENTS_FOLDER_NAME, FOLDER_MIME
 from google_sheets import ATTACHMENT_COLUMN, _retry
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -98,7 +97,7 @@ def main():
     args = parser.parse_args()
 
     creds = load_credentials()
-    drive = build("drive", "v3", credentials=creds)
+    drive = drive_service(creds)
     gc = gspread.authorize(creds)
     root = config.GOOGLE_DRIVE_FOLDER_ID
 

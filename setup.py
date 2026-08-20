@@ -437,18 +437,55 @@ def stamp_channel_ids(drive, env: dict[str, str], channels: dict[str, str]) -> i
     return stamped
 
 
+def ask_parent_folder(drive) -> str | None:
+    """Where the bot's folder should be created, or None for My Drive.
+
+    A shared drive is the reason to ask. Files made inside one belong to the
+    organisation rather than to the account running the bot, so losing that
+    account no longer loses the logs — but the bot cannot put a folder there
+    unless it is told which one.
+    """
+    print("      保存先の親フォルダがあれば、その URL か ID を貼ってください。")
+    print("      共有ドライブに置くと、ファイルの所有者が組織になります。")
+    print("      空のまま Enter を押すと、このアカウントのマイドライブに作ります。")
+    raw = input("      親フォルダ (省略可): ").strip()
+    if not raw:
+        return None
+
+    # Accepts a folder URL or a bare id; a shared drive's own root works too.
+    match = re.search(r"/folders/([A-Za-z0-9_-]+)", raw)
+    folder_id = match.group(1) if match else raw.split("?")[0].strip("/")
+
+    try:
+        meta = drive.files().get(
+            fileId=folder_id, fields="id,name,mimeType,driveId"
+        ).execute()
+    except Exception as e:
+        warn(f"そのフォルダを開けませんでした: {e}")
+        warn("マイドライブに作成します。あとから移動できます。")
+        return None
+
+    if meta.get("mimeType") != "application/vnd.google-apps.folder":
+        warn("フォルダではないようです。マイドライブに作成します。")
+        return None
+
+    where = "共有ドライブ内" if meta.get("driveId") else "マイドライブ内"
+    ok(f"親フォルダ: {meta['name']}（{where}）")
+    return meta["id"]
+
+
 def provision_google_resources(
     env: dict[str, str], workspace: str, channels: dict[str, str] | None = None,
 ) -> dict[str, str]:
     import gspread
-    from googleapiclient.discovery import build
 
+    from google_drive import drive_service, shared_drive_id
     from sheet_guide import ensure_guide_sheet
 
     step(3, "スプレッドシートと Drive フォルダの準備")
 
     creds = google_auth.load_credentials()
-    drive = build("drive", "v3", credentials=creds)
+    drive = drive_service(creds)
 
     # The folder comes first so the spreadsheet can be created inside it.
     # Private channel spreadsheets and attachment folders already live here,
@@ -456,9 +493,10 @@ def provision_google_resources(
     if env.get("GOOGLE_DRIVE_FOLDER_ID"):
         ok(f"既存の Drive フォルダを使用: {env['GOOGLE_DRIVE_FOLDER_ID']}")
     else:
+        parent = ask_parent_folder(drive)
         folder_name = DRIVE_FOLDER_NAME.format(workspace=workspace)
         folder_id, created = find_or_create(
-            drive, folder_name, "application/vnd.google-apps.folder"
+            drive, folder_name, "application/vnd.google-apps.folder", parent=parent,
         )
         env["GOOGLE_DRIVE_FOLDER_ID"] = folder_id
         # Saved as soon as it is known. Anything created here exists in Drive
@@ -469,6 +507,12 @@ def provision_google_resources(
         print(f"      https://drive.google.com/drive/folders/{folder_id}")
 
     folder_id = env["GOOGLE_DRIVE_FOLDER_ID"]
+    in_shared_drive = bool(shared_drive_id(drive, folder_id))
+    if in_shared_drive:
+        ok("保存先は共有ドライブです")
+        print("      ファイルの所有者は共有ドライブ（組織）になります。")
+        print("      閲覧できる範囲は共有ドライブのメンバーで決まり、")
+        print("      チャンネルごとの個別共有は行いません。")
 
     if env.get("GOOGLE_SPREADSHEET_ID"):
         ok(f"既存のスプレッドシートを使用: {env['GOOGLE_SPREADSHEET_ID']}")
@@ -493,7 +537,7 @@ def provision_google_resources(
     # Google leaves an empty default sheet behind; make it the guide.
     try:
         spreadsheet = gspread.authorize(creds).open_by_key(env["GOOGLE_SPREADSHEET_ID"])
-        if ensure_guide_sheet(spreadsheet):
+        if ensure_guide_sheet(spreadsheet, in_shared_drive):
             ok("説明タブ「📖 このシートについて」を作成")
         else:
             ok("説明タブは作成済み")
@@ -530,13 +574,13 @@ def verify(env: dict[str, str]):
         import config
         import gspread
 
+        from google_drive import drive_service
+
         creds = google_auth.load_credentials()
         gc = gspread.authorize(creds)
         ss = gc.open_by_key(config.GOOGLE_SPREADSHEET_ID)
         ok(f"スプレッドシートを開けました: {ss.title}")
-
-        from googleapiclient.discovery import build
-        drive = build("drive", "v3", credentials=creds)
+        drive = drive_service(creds)
         folder = drive.files().get(
             fileId=config.GOOGLE_DRIVE_FOLDER_ID, fields="name"
         ).execute()

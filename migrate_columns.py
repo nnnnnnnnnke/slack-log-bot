@@ -23,9 +23,9 @@ import sys
 import time
 
 import gspread
-from googleapiclient.discovery import build
 
 import config
+from google_drive import drive_service
 from google_auth import load_credentials
 from google_sheets import (
     HEADER_ROW,
@@ -122,7 +122,7 @@ def main():
 
     creds = load_credentials()
     gc = gspread.authorize(creds)
-    drive = build("drive", "v3", credentials=creds)
+    drive = drive_service(creds)
     handler = SheetsHandler()
 
     targets = find_targets(gc, drive)

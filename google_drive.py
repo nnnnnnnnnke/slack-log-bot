@@ -14,6 +14,82 @@ logger = logging.getLogger(__name__)
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
+# Requests that need telling a shared drive exists. A files() or permissions()
+# call without supportsAllDrives fails as a 404 on a file that plainly exists,
+# and files().list quietly returns nothing at all — the confusing shape of
+# failure, so the flags are filled in here rather than at forty call sites
+# where the one that gets forgotten is the one that breaks.
+_ALL_DRIVES_METHODS = {
+    "files": {"get", "list", "create", "update", "copy", "delete"},
+    "permissions": {"get", "list", "create", "update", "delete"},
+}
+
+
+class _AllDrives:
+    """A Drive collection that passes the shared-drive flags on every call."""
+
+    def __init__(self, inner, methods: set[str], is_files: bool):
+        self._inner = inner
+        self._methods = methods
+        self._is_files = is_files
+
+    def __getattr__(self, name):
+        method = getattr(self._inner, name)
+        if name not in self._methods:
+            return method
+
+        def call(**kwargs):
+            kwargs.setdefault("supportsAllDrives", True)
+            if name == "list" and self._is_files:
+                kwargs.setdefault("includeItemsFromAllDrives", True)
+            return method(**kwargs)
+
+        return call
+
+
+class _DriveService:
+    """The Drive client, wrapping the two collections that need the flags."""
+
+    def __init__(self, service):
+        self._service = service
+
+    def files(self):
+        return _AllDrives(self._service.files(), _ALL_DRIVES_METHODS["files"], True)
+
+    def permissions(self):
+        return _AllDrives(
+            self._service.permissions(), _ALL_DRIVES_METHODS["permissions"], False
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._service, name)
+
+
+def drive_service(credentials=None):
+    """A Drive client that works in My Drive and in a shared drive alike."""
+    return _DriveService(
+        build("drive", "v3", credentials=credentials or load_credentials())
+    )
+
+
+def shared_drive_id(service, file_id: str) -> str | None:
+    """The shared drive holding this file, or None when it sits in My Drive.
+
+    Which one it is decides who can read the logs. In My Drive the bot shares
+    each channel's file with that channel's members and takes the share back
+    when they leave. A shared drive answers that question itself: membership
+    is the drive's, it cannot be narrowed per file, and a share the bot added
+    on top could not be removed again. So the bot stops sharing and lets the
+    drive decide.
+    """
+    try:
+        return service.files().get(
+            fileId=file_id, fields="driveId"
+        ).execute().get("driveId")
+    except Exception as e:
+        logger.warning(f"Could not tell whether {file_id} is in a shared drive: {e}")
+        return None
+
 # Channel folders live under this, so the root folder shows the spreadsheets
 # rather than one folder per channel mixed in among them.
 ATTACHMENTS_FOLDER_NAME = "添付ファイル"
@@ -97,21 +173,22 @@ def sync_permissions(
 
 class DriveHandler:
     def __init__(self):
-        self.service = build("drive", "v3", credentials=load_credentials())
+        self.service = drive_service()
         self.root_folder_id = config.GOOGLE_DRIVE_FOLDER_ID
+        self.shared_drive_id = shared_drive_id(self.service, self.root_folder_id)
+        if self.shared_drive_id:
+            logger.info(
+                "Attachments live in a shared drive; who can read them is the "
+                "drive's membership, not something the bot sets per channel."
+            )
         # Cache: channel_name -> folder_id
         self._channel_folders: dict[str, str] = {}
         self._attachments_root: str | None = None
 
-    def _share_with_anyone(self, file_id: str):
-        """Make a file/folder readable by anyone with the link."""
-        self.service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-        ).execute()
-
     def _share_with_emails(self, file_id: str, emails: list[str]) -> int:
         """Share a file/folder with specific email addresses. Returns the count."""
+        if self.shared_drive_id:
+            return 0
         shared = 0
         for email in emails:
             try:
@@ -264,6 +341,8 @@ class DriveHandler:
         folder_id = self._get_or_create_channel_folder(
             channel_name, member_emails, channel_id
         )
+        if self.shared_drive_id:
+            return (0, 0)
         return sync_permissions(self.service, folder_id, member_emails, revoke)
 
     def upload_file(
