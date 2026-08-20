@@ -111,10 +111,20 @@ write_files:
         sleep 5
       done
 
+      export DEBIAN_FRONTEND=noninteractive
+      command -v git >/dev/null 2>&1 || {{ apt-get update -qq; apt-get install -y -qq git; }}
+
       if [ ! -d "$DEST/.git" ]; then
         sudo -u nukui git clone --depth 1 "$REPO" "$DEST"
       fi
       cd "$DEST"
+
+      # cloud-init の packages: も同じ名前解決レースで落ちうる。落ちても
+      # そこで止まらず後段に進むので、ここで前提を入れ直しておく。
+      # python3-venv が無いと venv 作成が ensurepip で失敗する。
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq || true
+      apt-get install -y -qq python3-venv python3-pip git ca-certificates avahi-daemon
 
       # cryptography などは arm64 のホイールが入るのでビルドは走らない。
       # 32bit イメージだとここが Rust のソースビルドになり数十分かかる。
